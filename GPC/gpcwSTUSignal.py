@@ -9,22 +9,6 @@ from utils import lqr, get_hankel
 
 class GPCwSTU(torch.nn.Module):
     def __init__(self, A, B, Q, R, h=5, eta=0.001, T=100, name="GPC", nl=False):
-
-        """
-        Gradient Perturbation Controller implementation in PyTorch
-        
-        Args:
-            A: System dynamics matrix
-            B: Control matrix
-            Q: State cost matrix
-            R: Control cost matrix
-            h: History horizon 
-            eta: Learning rate
-            W_test: Test perturbation sequence
-            name: Controller name
-            nl: Whether to use nonlinear dynamics
-
-        """
         super().__init__()
         self.name = name
         self.nl = nl

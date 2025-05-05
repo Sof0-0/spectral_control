@@ -9,22 +9,6 @@ from utils import lqr, get_hankel_new, get_hankel
 
 class OSCwSTU(torch.nn.Module):
     def __init__(self, A, B, Q, R, h=5, m=20, gamma=0.1, eta=0.001, T=100, name="OSC"):
-        """
-        Optimal Spectral Controller implementation in PyTorch
-        
-        Args:
-            A: System dynamics matrix
-            B: Control matrix
-            Q: State cost matrix
-            R: Control cost matrix
-            h: History horizon for spectral decomposition
-            m: Hankel matrix size
-            gamma: Discount factor for Hankel matrix
-            eta: Learning rate
-            T: Time horizon
-            name: Controller name
-            nl: Whether to use nonlinear dynamics
-        """
 
         super().__init__()
         self.name = name
