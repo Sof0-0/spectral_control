@@ -5,7 +5,7 @@ import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.functional import relu, leaky_relu
 
-from utils import lqr, get_hankel_new, get_hankel
+from PO.utils import lqr, get_hankel_new, get_hankel
 
 class OSCwSTU(torch.nn.Module):
     def __init__(self, A, B, Q, R, h=5, m=20, gamma=0.1, eta=0.001, T=100, name="OSC"):

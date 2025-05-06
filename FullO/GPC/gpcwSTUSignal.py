@@ -5,7 +5,7 @@ import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.functional import relu, leaky_relu
 
-from utils import lqr, get_hankel
+from FullO.utils import lqr, get_hankel
 
 class GPCwSTU(torch.nn.Module):
     def __init__(self, A, B, Q, R, h=5, eta=0.001, T=100, name="GPC", nl=False):

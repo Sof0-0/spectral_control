@@ -5,10 +5,24 @@ import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.functional import relu, leaky_relu
 
-from utils import lqr, get_hankel_new
+from PO.OSC.utils import lqr, get_hankel_new
+
+
+
+
+"""
+Notes for the new PO implementation:
+    First naive algo:
+        1. Use x_t without the noise (this is x_t_nat).
+        2. Find linear projection of x_t_nat to get y_t_nat (via Cx_t_nat).
+
+    This is only comparable against LDC since we do not take into account perturbations history. 
+
+
+"""
 
 class OSC_PO(torch.nn.Module):
-    def __init__(self, A, B, Q, R, h=5, m=20, gamma=0.1, eta=0.001, T=100, name="OSC", nl=False):
+    def __init__(self, A, B, C, Q, R, h=5, m=20, gamma=0.1, eta=0.001, T=100, name="OSC", nl=False):
 
         super().__init__()
         self.name = name
@@ -18,6 +32,7 @@ class OSC_PO(torch.nn.Module):
         # Register system matrices as buffers
         self.register_buffer("A", torch.tensor(A, dtype=torch.float32))
         self.register_buffer("B", torch.tensor(B, dtype=torch.float32))
+        self.register_buffer("C", torch.tensor(C, dtype=torch.float32))
         self.register_buffer("Q", torch.tensor(Q, dtype=torch.float32))
         self.register_buffer("R", torch.tensor(R, dtype=torch.float32))
         self.register_buffer("K", torch.tensor(lqr(A, B, Q, R), dtype=torch.float32))
@@ -101,8 +116,10 @@ class OSC_PO(torch.nn.Module):
         
         # Initialize state and control
         x = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+        y_nat = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
         
         x_prev = torch.zeros_like(x)
+        y_nat_prev = torch.zeros_like(y_nat)
         u_prev = torch.zeros(self.m_control, 1, dtype=torch.float32, device=self.device)
 
 
@@ -129,21 +146,22 @@ class OSC_PO(torch.nn.Module):
                     x_nl = self.nonlinear_dynamics(x_prev)
                     x = self.A @ x_nl + self.B @ u_prev + w_t
                 else:
-                    x = self.A @ x_prev + self.B @ u_prev + w_t
+                    x = self.A @ y_nat_prev + self.B @ u_prev + w_t
             
+
+            y_nat = self.C @ x  # Natural state (linear projection)
+
             # Update perturbation history (roll and add new perturbation)
             self.w_history = torch.roll(self.w_history, -1, dims=0)
             self.w_history[-1] = w_t
             
             # Calculate control using LQR + learned perturbation compensation
-            u_nominal = -self.K @ x  # LQR component
+            u_nominal = -self.K @ y_nat  # use y_nat instead of x
             
             # Add the learned perturbation compensation using spectral decomposition
             recent_w = self.w_history[-self.m:]
             
             
-
-
             ##### MAIN STEP 
             # Compute control perturbation using spectral components
 
@@ -177,7 +195,7 @@ class OSC_PO(torch.nn.Module):
             
             
             # Compute quadratic cost
-            cost = x.T @ self.Q @ x + u.T @ self.R @ u
+            cost = y_nat.T @ self.Q @ y_nat + u.T @ self.R @ u
             self.losses[t] = cost.item()
             
             # Skip gradient updates until we have enough history (warm-up phase)
@@ -211,8 +229,9 @@ class OSC_PO(torch.nn.Module):
 
             self.e_history.append(self.E.detach().clone())
             
-            # Save current state and control for next iteration
+            # Save current state, y_nat, and control for next iteration
             x_prev = x.clone()
+            y_nat_prev = y_nat.clone()
             u_prev = u.clone()
 
             #if t % 20 == 0:
@@ -242,7 +261,7 @@ class OSC_PO(torch.nn.Module):
         # Simulate dynamics for h steps ahead
         for h_step in range(self.h):
             # Compute control: u = K @ y + spectral perturbation compensation + bias
-            v_nominal = self.K @ y
+            v_nominal = self.K @ y_nat
             
             # Compute spectral perturbation compensation
             v_pert = torch.zeros_like(self.bias)
@@ -286,9 +305,10 @@ class OSC_PO(torch.nn.Module):
             w_next = self.w_history[h_step + self.m] if h_step + self.m < self.w_history.size(0) else torch.zeros_like(y)
             #print("W next:", w_next)
             y = self.A @ y + self.B @ v + w_next
+            y_nat = self.C @ y # create the y natural state
             
             # Compute cost at this horizon step
-            step_cost = y.T @ self.Q @ y + v.T @ self.R @ v
+            step_cost = y_nat.T @ self.Q @ y_nat + v.T @ self.R @ v
             
             proxy_cost += step_cost
         
