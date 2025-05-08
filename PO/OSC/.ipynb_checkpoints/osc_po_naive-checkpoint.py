@@ -116,9 +116,11 @@ class OSC_PO(torch.nn.Module):
         
         # Initialize state and control
         x = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+        y_obs = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
         y_nat = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
         
         x_prev = torch.zeros_like(x)
+        y_obs_prev = torch.zeros_like(y_obs)
         y_nat_prev = torch.zeros_like(y_nat)
         u_prev = torch.zeros(self.m_control, 1, dtype=torch.float32, device=self.device)
 
@@ -146,10 +148,10 @@ class OSC_PO(torch.nn.Module):
                     x_nl = self.nonlinear_dynamics(x_prev)
                     x = self.A @ x_nl + self.B @ u_prev + w_t
                 else:
-                    x = self.A @ y_nat_prev + self.B @ u_prev + w_t
+                    x = self.A @ y_prev + self.B @ u_prev + w_t # use y_prev 
             
 
-            y_nat = self.C @ x  # Natural state (linear projection)
+            y_obs = self.C @ x  # get y_t
 
             # Update perturbation history (roll and add new perturbation)
             self.w_history = torch.roll(self.w_history, -1, dims=0)
@@ -256,6 +258,7 @@ class OSC_PO(torch.nn.Module):
         """
         # Start with zero initial state for proxy simulation
         y = torch.zeros(self.n, 1, device=self.device)
+        y_nat = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
         proxy_cost = 0.0
         
         # Simulate dynamics for h steps ahead

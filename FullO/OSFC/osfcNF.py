@@ -78,6 +78,7 @@ class OSC(torch.nn.Module):
         
     def nonlinear_dynamics(self, x):
         return leaky_relu(x)
+
   
     def run(self):
         self.to(self.device)

@@ -19,7 +19,7 @@ def make_diagonalizable_matrix(n):
     #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
 
     
-    D = np.diag(np.random.uniform(0.89, 0.91, n))  # Diagonal with values close to 1
+    D = np.diag(np.random.uniform(0.99, 1.01, n))  # Diagonal with values close to 1
     P = np.random.randn(n, n)
     while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
         P = np.random.randn(n, n)
