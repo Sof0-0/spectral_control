@@ -25,14 +25,14 @@ class GRC(torch.nn.Module):
         
         # Set controller parameters
         self.h = h  # horizon length 
-        self.m = 5  
+        self.m = 10  
         self.n, self.m_control = B.shape  # state and control dimensions
         self.eta = eta  
         self.T = T
         self.W_test = self._initialize_sinusoidal_disturbances()
         
         # E has shape (m_control, n, self.m) - maps past m perturbations to control
-        self.E = torch.nn.Parameter(torch.ones(self.m_control, self.n, self.m) * 1e-1)
+        self.E = torch.nn.Parameter(torch.ones(self.m_control, self.n, self.m) *1e-1)
         self.bias = torch.nn.Parameter(torch.zeros(self.m_control, 1))
         
         # Store the test perturbation sequence
@@ -201,11 +201,11 @@ class GRC(torch.nn.Module):
                 scheduler.step()
                 
 
-                with torch.no_grad():
-                    total_norm = torch.norm(self.E)
-                    max_norm = 10.0 
-                    if total_norm > max_norm:
-                        self.E *= max_norm / total_norm
+                # with torch.no_grad():
+                #     total_norm = torch.norm(self.E)
+                #     max_norm = 10.0 
+                #     if total_norm > max_norm:
+                #         self.E *= max_norm / total_norm
             
 
             #self.e_history.append(self.E.detach().clone())

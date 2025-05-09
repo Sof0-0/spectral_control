@@ -8,7 +8,7 @@ from torch.nn.functional import relu, leaky_relu
 from PO.utils import lqr, get_hankel_new
 
 class OSC_PO(torch.nn.Module):
-    def __init__(self, A, B, C,  Q, R, h, H, gamma, eta=0.001, T=100, name="GRC", nl=False):
+    def __init__(self, A, B, C,  Q, R, h, H, gamma, eta=0.001, T=100, name="DOSC", nl=False):
 
         super().__init__()
         self.name = name
@@ -26,8 +26,8 @@ class OSC_PO(torch.nn.Module):
         # Set controller parameters
         self.h = h  # filter dimension parameter for columns
         self.H = H  # filter dimension parameter for rows (FIGURE OUT WHAT THESE ARE)
-        self.m = 5  # number of past y_nat to consider (columns)
-        self.M = 5  # number of history rows to consider (FIGURE OUT WHAT THESE ARE)
+        self.m = 10  # number of past y_nat to consider (columns)
+        self.M = 10  # number of history rows to consider (FIGURE OUT WHAT THESE ARE)
         self.n, self.m_control = B.shape  # state and control dimensions
         self.eta = eta  
         self.gamma = gamma
@@ -39,7 +39,7 @@ class OSC_PO(torch.nn.Module):
         # Compute Hankel matrix for columns
 
         ######### FILTERS ##########
-        Z_m = self.get_hankel_new(self.m, self.gamma)
+        Z_m = get_hankel_new(self.m, self.gamma)
         eigvals_m, eigvecs_m = torch.linalg.eigh(Z_m)
         
         # Register top-h eigenvalues and eigenvectors for columns
@@ -47,7 +47,7 @@ class OSC_PO(torch.nn.Module):
         self.register_buffer("phi_m", eigvecs_m[:, -self.h:].clone().detach().to(torch.float32)) # Corresponding eigenvectors
         
         # Compute Hankel matrix for rows
-        Z_M = self.get_hankel_new(self.M, self.gamma)
+        Z_M = get_hankel_new(self.M, self.gamma)
         eigvals_M, eigvecs_M = torch.linalg.eigh(Z_M)
         
         # Register top-H eigenvalues and eigenvectors for rows
@@ -58,7 +58,7 @@ class OSC_PO(torch.nn.Module):
 
         # E has shape (m_control, n, self.m) - maps past m perturbations to control
         self.E = torch.nn.Parameter(torch.ones(self.m_control, self.n, self.m) * 1e-1) # control by state by memory (4 by 10 by 5)
-        self.E_new = torch.nn.Parameter(torch.ones(self.m_control, self.n, self.m, self.M), * 1e-1) # control by state by memory1 by memory2 (4 by 10 by 5 by ?)
+        self.E_new = torch.nn.Parameter(torch.ones(self.m_control, self.n, self.m, self.M) *1e-1) # control by state by memory1 by memory2 (4 by 10 by 5 by ?)
         self.bias = torch.nn.Parameter(torch.zeros(self.m_control, 1))
         
         # Store the test perturbation sequence
@@ -157,7 +157,7 @@ class OSC_PO(torch.nn.Module):
         # First filter matrix (h×m) - for columns
         filter_matrix_1 = torch.zeros(self.h, self.m, device=self.device)
         for i in range(self.h):
-            filter_matrix_1[i] = torch.pow(self.sigma_m[i], 0.25) * self.phi_m[:, i]
+            filter_matrix_1[i] = torch.pow(self.sigma_m[i], 0.25) * self.phi_m[:, i] # TODO (issue): currently OOB here 
         
         # Second filter matrix ((H+1)×M) - for rows
         filter_matrix_2 = torch.zeros(self.H+1, self.M, device=self.device)
@@ -240,7 +240,7 @@ class OSC_PO(torch.nn.Module):
             y_obs = self.C @ x # introduce the y_t as a linear projection of x
             
             # Update perturbation history (roll and add new perturbation)
-            #with torch.no_grad():
+        
             self.w_history = torch.roll(self.w_history, -1, dims=0)
             self.w_history[-1] = w_t
 
@@ -252,6 +252,7 @@ class OSC_PO(torch.nn.Module):
                 self.y_nat_history[-1] = y_nat
 
             # Construct Y_nat tensor and apply filtering
+           
             Y_nat_tensor = self.construct_Y_nat_tensor()
             Y_nat_filtered = self.filter_Y_nat(Y_nat_tensor)
             
@@ -270,7 +271,7 @@ class OSC_PO(torch.nn.Module):
                         # Map indices to filtered tensor using learned E matrix
                         if i < self.h and j < self.H+1:
                             for state_idx in range(self.n):
-                                u_pert[:, 0] += self.E[:, n_idx, i, j] * Y_nat_filtered[i, j, state_idx]
+                                u_pert[:, 0] += self.E_new[:, n_idx, i, j] * Y_nat_filtered[i, j, state_idx]
 
             ##### MAIN STEP END
             
@@ -280,7 +281,7 @@ class OSC_PO(torch.nn.Module):
             #self.u_trajectory.append(u.detach().clone())
 
             # Update control history (roll and add new control)
-            #with torch.no_grad():  # Prevent tracking for buffer updates
+     
             self.u_history = torch.roll(self.u_history, -1, dims=0)
             self.u_history[-1] = u
 
@@ -296,15 +297,16 @@ class OSC_PO(torch.nn.Module):
                 proxy_loss = self.compute_proxy_loss()
                 proxy_loss.backward()
                 
+                
                 optimizer.step()
                 scheduler.step()
                 
 
-                with torch.no_grad():
-                    total_norm = torch.norm(self.E)
-                    max_norm = 10.0 
-                    if total_norm > max_norm:
-                        self.E *= max_norm / total_norm
+                # with torch.no_grad():
+                #     total_norm = torch.norm(self.E_new)
+                #     max_norm = 5.0 
+                #     if total_norm > max_norm:
+                #         self.E_new *= max_norm / total_norm
             
 
             #self.e_history.append(self.E.detach().clone())
@@ -326,6 +328,7 @@ class OSC_PO(torch.nn.Module):
         # Get current Y_nat tensor and its filtered version
         Y_nat_tensor = self.construct_Y_nat_tensor() # construct an empty tensor to hold information
         Y_nat_filtered = self.filter_Y_nat(Y_nat_tensor)
+        #print("Y NAT FILTERED OUTSIDE", Y_nat_filtered)
         
         # Simulate dynamics for h steps ahead
         for h in range(self.h):
@@ -352,7 +355,7 @@ class OSC_PO(torch.nn.Module):
                     if i < self.h and j < self.H+1:
                         for state_idx in range(self.n): # for each state
                             # TODO: should I use y_nat_filtered history?
-                            v_pert[:, 0] += self.E[:, state_idx, i, j] * Y_nat_filtered[i, j, state_idx]
+                            v_pert[:, 0] += self.E_new[:, state_idx, i, j] * Y_nat_filtered[i, j, state_idx]
             
             # Total control: nominal + perturbation compensation + bias
             v = v_nominal + v_pert + self.bias
@@ -361,8 +364,10 @@ class OSC_PO(torch.nn.Module):
             y_obs_sim = self.A @ y_obs_sim + self.B @ v + w_next
             y_obs_sim = self.C @ y_obs_sim
 
-            Y_nat_tensor = self.construct_Y_nat_tensor(y_obs_sim) # use the new y_obs_sim to get a tensor 
+            Y_nat_tensor = self.construct_Y_nat_tensor() # use the new y_obs_sim to get a tensor 
             Y_nat_filtered = self.filter_Y_nat(Y_nat_tensor)
+
+            #print("Y NAT FILTERED INSIDE NEW", Y_nat_filtered)
 
 
             # Compute cost at this horizon step
