@@ -11,18 +11,33 @@ def project_l2_ball(x, radius):
         return x * (radius / norm_x)
     return x
 
-def make_diagonalizable_matrix(n):
-    """ Generate a diagonalizable matrix A. """
+# def make_diagonalizable_matrix(n):
+#     """ Generate a diagonalizable matrix A. """
 
-    # Negative eigenvalues:
-    #signs = np.random.choice([-1, 1], size=n) # comment out signs if only testing for positive
-    #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
+#     # Negative eigenvalues:
+#     #signs = np.random.choice([-1, 1], size=n) # comment out signs if only testing for positive
+#     #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
 
     
-    D = np.diag(np.random.uniform(0.99, 1.01, n))  # Diagonal with values close to 1
+#     D = np.diag(np.random.uniform(0.99, 1.01, n))  # Diagonal with values close to 1
+#     P = np.random.randn(n, n)
+#     while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
+#         P = np.random.randn(n, n)
+#     A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
+#     return A
+
+def make_diagonalizable_matrix(n):
+    """ Generate a diagonalizable matrix A with all eigenvalues exactly 0.99. """
+    
+    # Create diagonal matrix with all eigenvalues = 0.99
+    D = np.diag(np.ones(n) * 0.98)  # All diagonal elements set to 0.99
+    
+    # Generate a random well-conditioned matrix for similarity transformation
     P = np.random.randn(n, n)
     while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
         P = np.random.randn(n, n)
+    
+    # Create similar matrix A with same eigenvalues as D
     A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
     return A
 

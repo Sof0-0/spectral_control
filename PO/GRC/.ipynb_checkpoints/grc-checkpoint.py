@@ -1,5 +1,4 @@
 import numpy as np
-import scipy as scp
 import matplotlib.pyplot as plt
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
@@ -8,7 +7,7 @@ from torch.nn.functional import relu, leaky_relu
 from PO.utils import lqr
 
 class GRC(torch.nn.Module):
-    def __init__(self, A, B, C,  Q, R, h=5, eta=0.001, T=100, name="GRC", nl=False):
+    def __init__(self, A, B, C, Q, R, h, eta=0.001, T=100, name="ModifiedGRC", nl=False):
 
         super().__init__()
         self.name = name
@@ -24,36 +23,38 @@ class GRC(torch.nn.Module):
         self.register_buffer("K", torch.tensor(lqr(A, B, Q, R), dtype=torch.float32))
         
         # Set controller parameters
-        self.h = h  # horizon length 
-        self.m = 10  
+        self.h = h  # number of past y_nat values to consider
         self.n, self.m_control = B.shape  # state and control dimensions
+        self.p = C.shape[0]  # output dimension
+        
         self.eta = eta  
         self.T = T
         self.W_test = self._initialize_sinusoidal_disturbances()
         
-        # E has shape (m_control, n, self.m) - maps past m perturbations to control
-        self.E = torch.nn.Parameter(torch.ones(self.m_control, self.n, self.m) *1e-1)
+        # Initialize the M matrices for control computation
+        # Shape: [m_control, p, h+1] - For each control dimension, each output dimension, and each time step
+        self.M = torch.nn.Parameter(torch.ones(self.m_control, self.p, self.h+1))
         self.bias = torch.nn.Parameter(torch.zeros(self.m_control, 1))
         
         # Store the test perturbation sequence
         self.w_test = [w.to(self.device) for w in self.W_test] if self.W_test is not None else None
-        self.register_buffer("w_history", torch.zeros(self.h + self.m, self.n, 1))
-
-        # Tracking variables for states and controls
-        self.x_trajectory = []
-        self.u_trajectory = []
-        self.e_history = []
+        self.register_buffer("w_history", torch.zeros(self.h + self.h, self.n, 1))
 
         # Store control history for y_nat computation
         self.max_history_len = T  # Maximum length of control history to keep
         self.register_buffer("u_history", torch.zeros(self.max_history_len, self.m_control, 1))
 
         # Store y_nat history for control computation
-        self.register_buffer("y_nat_history", torch.zeros(self.m, self.C.shape[0], 1))  # Store last m y_nat values
+        self.register_buffer("y_nat_history", torch.zeros(self.h+1, self.p, 1))  # Store h+1 y_nat values
+
+        # Tracking variables for states and controls
+        self.x_trajectory = []
+        self.u_trajectory = []
+        self.losses = None
 
     def _initialize_sinusoidal_disturbances(self):
-       
-        # Keep freqyency = 3.0 and magnitude = 1.0 (noise example)
+        """Initialize sinusoidal disturbances for testing"""
+        # Keep frequency = 3.0 and magnitude = 1.0 (noise example)
         magnitude = 1.0
         freq = 3.0
 
@@ -62,7 +63,7 @@ class GRC(torch.nn.Module):
     
         w_matrix = magnitude * sin_values.repeat(self.n, 1).T
         
-        # Convert to list of tensors matching your original format
+        # Convert to list of tensors
         W_test = [
             w_matrix[i].reshape(-1, 1)
             for i in range(w_matrix.shape[0])
@@ -71,47 +72,79 @@ class GRC(torch.nn.Module):
         return W_test
         
     def nonlinear_dynamics(self, x):
+        """Apply nonlinear dynamics if nl flag is True"""
         return leaky_relu(x)
 
-    def compute_y_nat(self, y_obs, t):
+    def compute_y_nat_vectorized(self, y_obs, t):
         """
-        Compute y_nat using the formula: y_t^nat = y_t - C∑(A^i * B * u_{t-i}) for i=0 to t
+        Compute y_nat using vectorized operations:
+        y_t^nat = y_t - C∑(A^i * B * u_{t-i}) for i=0 to t
         """
-        if t == 0: return y_obs.clone()  # No control effect at t=0
-            
-        # Initialize sum term
+        if t == 0: 
+            return y_obs.clone()  # No control effect at t=0
+        
+        # Calculate how many previous controls to consider
+        history_len = min(t + 1, self.max_history_len)
+        
+        # Extract relevant control history - shape: [history_len, m_control, 1]
+        u_history_relevant = self.u_history[-history_len:].flip(0)
+        
+        # Initialize control effect
         control_effect = torch.zeros_like(y_obs, device=self.device)
         
-        # Compute the sum of control effects
-        for i in range(t + 1):
-            if i > self.max_history_len - 1: break  # Avoid index out of bounds
-                
+        # Create CB matrix for i=0 case
+        CB = self.C @ self.B  # Shape: [p, m_control]
+        
+        # Add the i=0 term
+        control_effect += CB @ u_history_relevant[0]
+        
+        # Add remaining terms
+        for i in range(1, history_len):
+            # Compute A^i
+            A_power_i = torch.matrix_power(self.A, i)
+            # Compute C * A^i * B
+            CAB = self.C @ A_power_i @ self.B  # Shape: [p, m_control]
+            # Add contribution to control effect
+            control_effect += CAB @ u_history_relevant[i]
             
-            u_t_minus_i = self.u_history[-(i+1)] # get past u_ts (t-i)
-            
-            if i == 0: term = self.C @ self.B @ u_t_minus_i # just need C*B*u_t
-            else:
-                # Else, we introduce A_power_i (after first step)
-                A_power_i = torch.matrix_power(self.A, i)
-                term = self.C @ A_power_i @ self.B @ u_t_minus_i
-                
-            control_effect += term
-            
+        # Compute y_nat
         y_nat = y_obs - control_effect
         
         return y_nat
-  
-    def run(self):
+
+    def compute_control_vectorized(self):
+        """
+        Highly optimized control computation using the formula:
+        u_t = sum_{i=0}^{h} M_i^t * y_{t-i}^{nat}
+        """
+        # Initialize control perturbation
+        u_pert = torch.zeros(self.m_control, 1, device=self.device)
         
+        # For each time step in the history
+        for i in range(self.h + 1):
+            # If we have enough history
+            if i < len(self.y_nat_history):
+                # Get the appropriate y_nat value
+                y_nat_i = self.y_nat_history[-(i+1)]  # Shape: [p, 1]
+                
+                # Apply the corresponding M matrix
+                # M shape: [m_control, p, h+1]
+                # For each control dimension and each output dimension
+                for j in range(self.p):
+                    u_pert += self.M[:, j:j+1, i] * y_nat_i[j]
+        
+        return u_pert
+
+    def run(self):
+        """Run the controller for T time steps"""
         self.to(self.device)
         self.losses = torch.zeros(self.T, dtype=torch.float32, device=self.device)
 
         # Reset tracking variables
         self.x_trajectory = []
         self.u_trajectory = []
-        self.e_history = []
         
-        # weight decay for stability
+        # Weight decay for stability
         optimizer = torch.optim.Adam(self.parameters(), lr=self.eta, weight_decay=1e-5)
         
         # Learning rate schedule: start low, increase, then decrease
@@ -122,75 +155,64 @@ class GRC(torch.nn.Module):
         
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         
-      
         x = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
-        y_obs = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
-        y_nat = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+        y_obs = torch.zeros(self.p, 1, dtype=torch.float32, device=self.device)
         
         x_prev = torch.zeros_like(x)
         u_prev = torch.zeros(self.m_control, 1, dtype=torch.float32, device=self.device)
-        
-
-        # Save initial E values
-        #self.e_history.append(self.E.detach().clone())
 
         for t in range(self.T):
-            
-            if self.w_test is not None and t < len(self.w_test): w_t = self.w_test[t] # perturbation for this time step
+            # Get or compute perturbation
+            if self.w_test is not None and t < len(self.w_test): 
+                w_t = self.w_test[t]  # Perturbation for this time step
             else:
                 # If no test perturbation provided, infer it from state dynamics
-                if t > 0: w_t = x - self.A @ x_prev - self.B @ u_prev
-                else: w_t = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+                if t > 0: 
+                    w_t = x - self.A @ x_prev - self.B @ u_prev
+                else: 
+                    w_t = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
             
-            # State update:
-            if t > 0: x = self.A @ x_prev + self.B @ u_prev + w_t
+            # State update
+            if t > 0: 
+                x = self.A @ x_prev + self.B @ u_prev + w_t
                     
-            y_obs = self.C @ x # introduce the y_t as a linear projection of x
+            y_obs = self.C @ x  # Introduce the y_t as a linear projection of x
             
-            # Update perturbation history (roll and add new perturbation)
-            #with torch.no_grad():
+            # Update perturbation history
             self.w_history = torch.roll(self.w_history, -1, dims=0)
             self.w_history[-1] = w_t
 
-            y_nat = self.compute_y_nat(y_obs, t) # get y_nat
-
+            # Compute y_nat and update history
+            y_nat = self.compute_y_nat_vectorized(y_obs, t)
+            
             # Update y_nat history (roll and add new y_nat)
             with torch.no_grad():  # Prevent tracking for buffer updates
                 self.y_nat_history = torch.roll(self.y_nat_history, -1, dims=0)
                 self.y_nat_history[-1] = y_nat
             
             # Calculate control using LQR + learned perturbation compensation
-            u_nominal = -self.K @ y_obs  # updated with y_nat
+            u_nominal = -self.K @ y_obs
             
-            # Add the learned perturbation compensation using the most recent m perturbations
-            u_pert = torch.zeros(self.m_control, 1, dtype=torch.float32, device=self.device)
-            
-
-            ##### MAIN STEP 
-            for i in range(self.m): # for the last m perturbations
-                if i < min(t+1, self.m): # check if we have enough history
-                    y_nat_i = self.y_nat_history[-(i+1)]  # Get past y_nat values in reverse order
-                    for j in range(y_nat_i.shape[0]): # over h
-                        u_pert += self.E[:, j:j+1, i] * y_nat_i[j]
-
-            ##### MAIN STEP END
+            # Add the learned perturbation compensation using vectorized operations
+            u_pert = self.compute_control_vectorized()
             
             # Total control: nominal + perturbation compensation + bias
             u = u_nominal + u_pert + self.bias
             
-            #self.u_trajectory.append(u.detach().clone())
-
-            # Update control history (roll and add new control)
-            #with torch.no_grad():  # Prevent tracking for buffer updates
+            # Update control history
             self.u_history = torch.roll(self.u_history, -1, dims=0)
             self.u_history[-1] = u
+
+            # Save trajectories
+            self.x_trajectory.append(x.detach().clone())
+            self.u_trajectory.append(u.detach().clone())
 
             # Compute quadratic cost
             cost = y_obs.T @ self.Q @ y_obs + u.T @ self.R @ u
             self.losses[t] = cost.item()
             
             # Skip gradient updates until we have enough history (warm-up phase)
-            if t >= self.h + self.m:
+            if t >= self.h:
                 optimizer.zero_grad()
                 
                 # Compute proxy loss (forward simulation of cost over horizon)
@@ -199,78 +221,47 @@ class GRC(torch.nn.Module):
                 
                 optimizer.step()
                 scheduler.step()
-                
-
-                # with torch.no_grad():
-                #     total_norm = torch.norm(self.E)
-                #     max_norm = 10.0 
-                #     if total_norm > max_norm:
-                #         self.E *= max_norm / total_norm
-            
-
-            #self.e_history.append(self.E.detach().clone())
 
             # Save current state and control for next iteration
             x_prev = x.clone()
             u_prev = u.clone()
     
-    
     def compute_proxy_loss(self):
         """
         Compute the proxy loss by simulating future states and controls
         """
-        # Start with the current state for proxy simulation
-        #x_sim = self.x_trajectory[-1].clone()
-        #y_obs_sim = self.C @ x_sim
-
-        # Clone the current histories for simulation
-        #y_nat_history_sim = self.y_nat_history.clone()
-        #u_history_sim = self.u_history.clone()
-
-        y_obs_sim = torch.zeros_like(self.A[:, 0:1])
+        y_obs_sim = torch.zeros(self.p, 1, dtype=torch.float32, device=self.device)
         proxy_cost = 0.0
         
         # Simulate dynamics for h steps ahead
         for h in range(self.h):
-            # Compute y_nat for this simulation step
-            #sim_time_step = t + h
-            #y_nat_sim = self.compute_y_nat(y_obs_sim, min(sim_time_step, t))
-
-            y_nat_hist_window = self.y_nat_history[-self.m:]  # Get the last m y_nat values
-            
-            # Update y_nat history for simulation
-            #y_nat_history_sim = torch.roll(y_nat_history_sim, -1, dims=0)
-            #y_nat_history_sim[-1] = y_nat_sim
-            
             # Calculate control using LQR + learned perturbation compensation
             v_nominal = -self.K @ y_obs_sim
             
-            # Compute perturbation compensation
-            v_pert = torch.zeros(self.m_control, 1, dtype=torch.float32, device=self.device)
-            n = self.A.shape[0]
-            
-            # MAIN STEP - similar to run() method
-            for i in range(self.m):
-                if i < len(y_nat_hist_window):
-                    #y_nat_i = y_nat_history_sim[-(i+1)]  # Get past y_nat values in reverse order
-                    for j in range(n):
-                        v_pert += self.E[:, j:j+1, i] * y_nat_hist_window[i][j]
+            # Compute perturbation compensation using vectorized operations
+            v_pert = self.compute_control_vectorized()
             
             # Total control: nominal + perturbation compensation + bias
             v = v_nominal + v_pert + self.bias
             
-            w_next = self.w_history[h + self.m]
-            y_obs_sim = self.A @ y_obs_sim + self.B @ v + w_next
-            y_obs_sim = self.C @ y_obs_sim
+            # Next perturbation from history
+            w_next = self.w_history[h + self.h]
             
+            # Apply state transition
+            state_sim = self.A @ y_obs_sim + self.B @ v + w_next
+            
+            # Apply state observation
+            y_obs_sim = self.C @ state_sim
+
             # Compute cost at this horizon step
             step_cost = y_obs_sim.T @ self.Q @ y_obs_sim + v.T @ self.R @ v
             proxy_cost += step_cost
     
         return proxy_cost
-    
+
 
 def plot_loss(controller, title):
+    """Plot the controller's loss over time"""
     plt.figure(figsize=(10, 6))
     plt.plot(controller.losses.cpu().numpy())
     plt.xlabel('Time Step')
