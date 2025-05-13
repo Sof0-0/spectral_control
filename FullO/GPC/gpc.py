@@ -158,7 +158,7 @@ class GradientPerturbationController(torch.nn.Module):
 
                 with torch.no_grad():
                     total_norm = torch.norm(self.E)
-                    max_norm = 5.0 
+                    max_norm = 1.0 
                     if total_norm > max_norm:
                         self.E *= max_norm / total_norm
             

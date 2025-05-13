@@ -7,7 +7,7 @@ from torch.nn.functional import relu, leaky_relu
 from PO.utils import lqr
 
 class GRC(torch.nn.Module):
-    def __init__(self, A, B, C, Q, R, h, eta=0.001, T=100, name="ModifiedGRC", nl=False):
+    def __init__(self, A, B, C, Q, R, h, eta=0.001, T=100, name="GRC", nl=False):
 
         super().__init__()
         self.name = name
@@ -53,8 +53,7 @@ class GRC(torch.nn.Module):
         self.losses = None
 
     def _initialize_sinusoidal_disturbances(self):
-        """Initialize sinusoidal disturbances for testing"""
-        # Keep frequency = 3.0 and magnitude = 1.0 (noise example)
+
         magnitude = 1.0
         freq = 3.0
 
@@ -72,7 +71,6 @@ class GRC(torch.nn.Module):
         return W_test
         
     def nonlinear_dynamics(self, x):
-        """Apply nonlinear dynamics if nl flag is True"""
         return leaky_relu(x)
 
     def compute_y_nat_vectorized(self, y_obs, t):
@@ -174,13 +172,18 @@ class GRC(torch.nn.Module):
             
             # State update
             if t > 0: 
-                x = self.A @ x_prev + self.B @ u_prev + w_t
+                if self.nl:
+                    x_nl = self.nonlinear_dynamics(x_prev)
+                    x = self.A @ x_nl + self.B @ u_prev + w_t
+                    
+                else: x = self.A @ x_prev + self.B @ u_prev + w_t
                     
             y_obs = self.C @ x  # Introduce the y_t as a linear projection of x
             
             # Update perturbation history
-            self.w_history = torch.roll(self.w_history, -1, dims=0)
-            self.w_history[-1] = w_t
+            with torch.no_grad():  # Prevent tracking for buffer updates
+                self.w_history = torch.roll(self.w_history, -1, dims=0)
+                self.w_history[-1] = w_t
 
             # Compute y_nat and update history
             y_nat = self.compute_y_nat_vectorized(y_obs, t)
@@ -200,8 +203,9 @@ class GRC(torch.nn.Module):
             u = u_nominal + u_pert + self.bias
             
             # Update control history
-            self.u_history = torch.roll(self.u_history, -1, dims=0)
-            self.u_history[-1] = u
+            with torch.no_grad():  # Prevent tracking for buffer updates
+                self.u_history = torch.roll(self.u_history, -1, dims=0)
+                self.u_history[-1] = u
 
             # Save trajectories
             self.x_trajectory.append(x.detach().clone())
@@ -218,9 +222,17 @@ class GRC(torch.nn.Module):
                 # Compute proxy loss (forward simulation of cost over horizon)
                 proxy_loss = self.compute_proxy_loss()
                 proxy_loss.backward()
+                #cost.backward()
                 
                 optimizer.step()
                 scheduler.step()
+
+                # with torch.no_grad():
+                #     total_norm = torch.norm(self.M)
+                #     max_norm = 5.0 
+                #     if total_norm > max_norm:
+                #         self.M *= max_norm / total_norm
+            
 
             # Save current state and control for next iteration
             x_prev = x.clone()

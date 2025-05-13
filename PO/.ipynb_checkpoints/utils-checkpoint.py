@@ -11,20 +11,20 @@ def project_l2_ball(x, radius):
         return x * (radius / norm_x)
     return x
 
-# def make_diagonalizable_matrix(n):
-#     """ Generate a diagonalizable matrix A. """
+def make_diagonalizable_matrix(n):
+    """ Generate a diagonalizable matrix A. """
 
-#     # Negative eigenvalues:
-#     #signs = np.random.choice([-1, 1], size=n) # comment out signs if only testing for positive
-#     #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
+    # Negative eigenvalues:
+    #signs = np.random.choice([-1, 1], size=n) # comment out signs if only testing for positive
+    #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
 
     
-#     D = np.diag(np.random.uniform(0.99, 1.01, n))  # Diagonal with values close to 1
-#     P = np.random.randn(n, n)
-#     while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
-#         P = np.random.randn(n, n)
-#     A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
-#     return A
+    D = np.diag(np.random.uniform(0.99, 1.01, n))  # Diagonal with values close to 1
+    P = np.random.randn(n, n)
+    while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
+        P = np.random.randn(n, n)
+    A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
+    return A
 
 def make_diagonalizable_matrix(n):
     """ Generate a diagonalizable matrix A with all eigenvalues exactly 0.99. """
@@ -135,3 +135,75 @@ def compare_losses(models, title="Loss Comparison", save_path=None):
 
     
     plt.show()
+
+def run_multiple_runs(controller_class, num_runs=50, T=100, seed_base=0, **controller_kwargs):
+    all_losses = []
+
+    for i in range(num_runs):
+        torch.manual_seed(seed_base + i)
+        np.random.seed(seed_base + i)
+
+        controller = controller_class(T=T, **controller_kwargs)
+        controller.run()
+        all_losses.append(controller.losses.cpu().numpy())
+
+    all_losses = np.stack(all_losses)  # Shape: [num_runs, T]
+    #print("LOSS", all_losses)
+    return all_losses
+
+# def plot_loss_with_95ci(loss_matrix, title):
+#     """
+#     loss_matrix: np.ndarray of shape (num_runs, T)
+#     """
+#     mean_loss = loss_matrix.mean(axis=0)
+#     std_loss = loss_matrix.std(axis=0)
+#     n = loss_matrix.shape[0]
+
+#     ci95 = 1.96 * (std_loss / np.sqrt(n))
+#     print("CI", ci95)
+#     timesteps = np.arange(loss_matrix.shape[1])
+
+#     plt.figure(figsize=(10, 6))
+#     plt.plot(timesteps, mean_loss, label='Mean Loss')
+#     plt.fill_between(timesteps, mean_loss - ci95, mean_loss + ci95, alpha=0.3, label='95% CI')
+
+#     plt.xlabel('Time Step')
+#     plt.ylabel('Loss')
+#     plt.title(title)
+#     plt.legend()
+#     plt.grid(True)
+#     plt.tight_layout()
+#     plt.show()
+
+
+def plot_runs_with_mean(loss_matrix, title):
+    """
+    Plot all runs' losses as light lines and overlay the mean loss in bold.
+    
+    Parameters:
+        loss_matrix (np.ndarray): shape (num_runs, T)
+        title (str): plot title
+    """
+    num_runs, T = loss_matrix.shape
+    timesteps = np.arange(T)
+
+    plt.figure(figsize=(10, 6))
+
+    # Plot each run's loss in a light color
+    for i in range(num_runs):
+        plt.plot(timesteps, loss_matrix[i], color='gray', alpha=0.2, linewidth=1)
+        print("LOSS MATRIX", loss_matrix[i])
+
+    # Compute and plot mean loss
+    mean_loss = loss_matrix.mean(axis=0)
+    plt.plot(timesteps, mean_loss, color='blue', linewidth=2.5, label='Mean Loss')
+
+    plt.xlabel('Time Step')
+    plt.ylabel('Loss')
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
