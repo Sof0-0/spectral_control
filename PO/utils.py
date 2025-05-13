@@ -11,20 +11,20 @@ def project_l2_ball(x, radius):
         return x * (radius / norm_x)
     return x
 
-def make_diagonalizable_matrix(n):
-    """ Generate a diagonalizable matrix A. """
+# def make_diagonalizable_matrix(n):
+#     """ Generate a diagonalizable matrix A. """
 
-    # Negative eigenvalues:
-    #signs = np.random.choice([-1, 1], size=n) # comment out signs if only testing for positive
-    #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
+#     # Negative eigenvalues:
+#     #signs = np.random.choice([-1, 1], size=n) # comment out signs if only testing for positive
+#     #D = np.diag(signs * np.random.uniform(0.98, 1.00, n))  # Diagonal with values close to 1
 
     
-    D = np.diag(np.random.uniform(0.89, 0.91, n))  # Diagonal with values close to 1
-    P = np.random.randn(n, n)
-    while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
-        P = np.random.randn(n, n)
-    A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
-    return A
+#     D = np.diag(np.random.uniform(0.79, 0.81, n))  # Diagonal with values close to 1
+#     P = np.random.randn(n, n)
+#     while np.linalg.cond(P) > n:  # Ensure P is well-conditioned
+#         P = np.random.randn(n, n)
+#     A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
+#     return A
 
 def make_diagonalizable_matrix(n):
     """ Generate a diagonalizable matrix A with all eigenvalues exactly 0.99. """
@@ -103,32 +103,85 @@ def plot_loss(model, title, save_path=None):
     
     plt.show()
 
-def plot_loss_sliding(controller, title, window_size):
-    """
-    Plot the moving average of the controller's loss over time.
+# def plot_loss_sliding(controller, title, window_size):
+#     """
+#     Plot the moving average of the controller's loss over time.
 
-    Parameters:
-    - controller: controller object with .losses attribute
-    - title: title for the plot
-    - window_size: window size for computing moving average
-    """
-    losses = controller.losses.cpu().numpy()
-    T = len(losses)
+#     Parameters:
+#     - controller: controller object with .losses attribute
+#     - title: title for the plot
+#     - window_size: window size for computing moving average
+#     """
+#     losses = controller.losses.cpu().numpy()
+#     T = len(losses)
 
-    if T < window_size:
-        raise ValueError("Window size should be smaller than the length of the loss sequence.")
+#     if T < window_size:
+#         raise ValueError("Window size should be smaller than the length of the loss sequence.")
 
-    # Compute moving average using convolution
-    moving_avg = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+#     # Compute moving average using convolution
+#     moving_avg = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(np.arange(window_size - 1, T), moving_avg)
-    plt.xlabel('Time Step')
-    plt.ylabel(f'{window_size}-Step Average Loss')
-    plt.title(title)
-    plt.grid(True)
+#     plt.figure(figsize=(10, 6))
+#     plt.plot(np.arange(window_size - 1, T), moving_avg)
+#     plt.xlabel('Time Step')
+#     plt.ylabel(f'{window_size}-Step Average Loss')
+#     plt.title(title)
+#     plt.grid(True)
+#     plt.tight_layout()
+#     plt.show()
+
+def plot_loss_sliding(controllers, title, window_size, labels=None, colors=None, figsize=(12, 7), alpha=0.8, save_path=None):
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    
+    # Convert single controller to list for uniform processing
+    if not isinstance(controllers, list):
+        controllers = [controllers]
+    
+    # Set default labels if not provided
+    if labels is None:
+        labels = [f"Controller {i+1}" for i in range(len(controllers))]
+    elif not isinstance(labels, list):
+        labels = [labels]  # Convert single label to list
+    
+    # Ensure labels and controllers have the same length
+    if len(labels) != len(controllers):
+        raise ValueError("Number of labels must match number of controllers")
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    for i, controller in enumerate(controllers):
+        losses = controller.losses.cpu().numpy()
+        T = len(losses)
+        
+        if T < window_size:
+            print(f"Warning: Window size ({window_size}) larger than loss sequence length ({T}) for {labels[i]}. Skipping.")
+            continue
+        
+        # Compute moving average using convolution
+        moving_avg = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+        
+        # Plot with color if specified
+        if colors and i < len(colors):
+            ax.plot(np.arange(window_size - 1, T), moving_avg, label=labels[i], alpha=alpha, color=colors[i])
+        else:
+            ax.plot(np.arange(window_size - 1, T), moving_avg, label=labels[i], alpha=alpha)
+    
+    ax.set_xlabel('Time Step')
+    ax.set_ylabel(f'{window_size}-Step Average Loss')
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')  # High-quality save
+    
     plt.tight_layout()
-    plt.show()
+    
+    return fig, ax
 
 def compare_losses(models, title="Loss Comparison", save_path=None):
     """
@@ -163,7 +216,7 @@ def compare_losses(models, title="Loss Comparison", save_path=None):
     
     plt.show()
 
-def run_multiple_runs(controller_class, num_runs=50, T=100, seed_base=0, **controller_kwargs):
+def run_multiple_runs(controller_class, num_runs=10, T=100, seed_base=0, **controller_kwargs):
     all_losses = []
 
     for i in range(num_runs):
@@ -178,29 +231,36 @@ def run_multiple_runs(controller_class, num_runs=50, T=100, seed_base=0, **contr
     #print("LOSS", all_losses)
     return all_losses
 
-# def plot_loss_with_95ci(loss_matrix, title):
-#     """
-#     loss_matrix: np.ndarray of shape (num_runs, T)
-#     """
-#     mean_loss = loss_matrix.mean(axis=0)
-#     std_loss = loss_matrix.std(axis=0)
-#     n = loss_matrix.shape[0]
 
-#     ci95 = 1.96 * (std_loss / np.sqrt(n))
-#     print("CI", ci95)
-#     timesteps = np.arange(loss_matrix.shape[1])
+def run_multiple_controllers(controller_configs, num_runs=10, seed_base=0):
 
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(timesteps, mean_loss, label='Mean Loss')
-#     plt.fill_between(timesteps, mean_loss - ci95, mean_loss + ci95, alpha=0.3, label='95% CI')
-
-#     plt.xlabel('Time Step')
-#     plt.ylabel('Loss')
-#     plt.title(title)
-#     plt.legend()
-#     plt.grid(True)
-#     plt.tight_layout()
-#     plt.show()
+    results = {}
+    
+    # Run each controller multiple times with its specific parameters
+    for config in controller_configs:
+        controller_class = config['class']
+        name = config['name']
+        params = config.get('params', {})
+        
+        print(f"Running {name}...")
+        
+        # Get the time steps T from params if specified
+        T = params.get('T', 500)
+        
+        all_losses = []
+        for i in range(num_runs):
+            torch.manual_seed(seed_base + i)
+            np.random.seed(seed_base + i)
+            
+            # Create controller with its specific parameters
+            controller = controller_class(**params)
+            controller.run()
+            all_losses.append(controller.losses.cpu().numpy())
+            
+        all_losses = np.stack(all_losses)  # Shape: [num_runs, T]
+        results[name] = all_losses
+    
+    return results
 
 
 def plot_runs_with_mean(loss_matrix, title):
@@ -219,7 +279,7 @@ def plot_runs_with_mean(loss_matrix, title):
     # Plot each run's loss in a light color
     for i in range(num_runs):
         plt.plot(timesteps, loss_matrix[i], color='gray', alpha=0.2, linewidth=1)
-        print("LOSS MATRIX", loss_matrix[i])
+        #print("LOSS MATRIX", loss_matrix[i])
 
     # Compute and plot mean loss
     mean_loss = loss_matrix.mean(axis=0)
@@ -232,5 +292,186 @@ def plot_runs_with_mean(loss_matrix, title):
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+def plot_multiple_controllers(results_dict, title="Comparison of Controllers", colors=None, save_path=None):
+
+    plt.figure(figsize=(12, 7))
+    
+    if colors is None:
+        # Default color cycle
+        colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+    
+    for i, (name, loss_matrix) in enumerate(results_dict.items()):
+        color = colors[i % len(colors)]
+        num_runs, T = loss_matrix.shape
+        timesteps = np.arange(T)
+        
+        # Plot individual runs with low alpha
+        for j in range(num_runs):
+            plt.plot(timesteps, loss_matrix[j], color=color, alpha=0.05, linewidth=0.5)
+        
+        # Plot mean with bold line
+        mean_loss = loss_matrix.mean(axis=0)
+        plt.plot(timesteps, mean_loss, color=color, linewidth=2.5, label=f'{name} (Mean)')
+    
+    plt.xlabel('Time Step')
+    plt.ylabel('Loss')
+    plt.title(title)
+    plt.legend()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')  # High-quality save
+
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_multiple_sliding_losses(results_dict, window_size=50, title="Sliding Window Loss Comparison", colors=None, save_path=None):
+    """
+    Plot sliding window average losses from multiple controllers on the same graph.
+    
+    Parameters:
+    results_dict (dict): Dictionary mapping controller names to loss matrices (shape [num_runs, T])
+    window_size (int): Window size for computing moving averages
+    title (str): Plot title
+    colors (list): Optional list of colors for each controller
+    """
+    plt.figure(figsize=(12, 7))
+    
+    if colors is None:
+        # Default color cycle
+        colors = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+    
+    for i, (name, loss_matrix) in enumerate(results_dict.items()):
+        color = colors[i % len(colors)]
+        
+        # Compute mean loss across all runs for this controller
+        mean_loss = loss_matrix.mean(axis=0)
+        T = len(mean_loss)
+        
+        if T < window_size:
+            print(f"Warning: Window size {window_size} is larger than time steps {T} for {name}. Skipping.")
+            continue
+        
+        # Compute moving average of mean loss
+        moving_avg = np.convolve(mean_loss, np.ones(window_size)/window_size, mode='valid')
+        
+        # Plot the sliding window average
+        plt.plot(
+            np.arange(window_size - 1, T), 
+            moving_avg, 
+            color=color, 
+            linewidth=2.5, 
+            label=f'{name}'
+        )
+    
+    plt.xlabel('Time Step')
+    plt.ylabel(f'{window_size}-Step Average Loss')
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')  # High-quality save
+
+    plt.tight_layout()
+    plt.show()
+
+def run_multiple_models_with_params(controller_configs, num_runs=10, seed_base=0):
+    """
+    Run multiple different controllers with their own specific parameters
+    
+    Parameters:
+    controller_configs (list): List of tuples (name, controller_class, params_dict)
+    num_runs (int): Number of runs per controller
+    seed_base (int): Base seed for reproducibility
+    
+    Returns:
+    dict: Dictionary of {name: loss_matrix} where loss_matrix has shape [num_runs, T]
+    """
+    all_results = {}
+    
+    for name, controller_class, params in controller_configs:
+        print(f"Running {name}...")
+        all_losses = []
+        
+        for i in range(num_runs):
+            torch.manual_seed(seed_base + i)
+            np.random.seed(seed_base + i)
+            
+            # Create a copy of the parameters to avoid modifying the original
+            run_params = params.copy()
+            
+            # Extract T from params if available
+            T = run_params.get('T', 100)  # Default to 100 if not specified
+            
+            controller = controller_class(**run_params)
+            controller.run()
+            all_losses.append(controller.losses.cpu().numpy())
+            
+        all_results[name] = np.stack(all_losses)  # Shape: [num_runs, T]
+    
+    return all_results
+
+def plot_multiple_models_with_ci(results_dict, title, colors=None, confidence=0.95, 
+                                legend_loc='best', figsize=(12, 7), ylim=None):
+    """
+    Plot multiple controllers' losses with mean and confidence intervals
+    
+    Parameters:
+    results_dict (dict): Dictionary of {name: loss_matrix}
+    title (str): Plot title
+    colors (dict, optional): Dictionary mapping controller names to colors
+    confidence (float): Confidence interval level (default: 0.95 for 95%)
+    legend_loc (str): Location of the legend
+    figsize (tuple): Figure size
+    ylim (tuple, optional): Y-axis limits (min, max)
+    """
+    plt.figure(figsize=figsize)
+    
+    if colors is None:
+        # Default colormap if no colors provided
+        color_list = plt.cm.tab10.colors
+        colors = {name: color_list[i % len(color_list)] 
+                 for i, name in enumerate(results_dict.keys())}
+    
+    for name, loss_matrix in results_dict.items():
+        num_runs, T = loss_matrix.shape
+        timesteps = np.arange(T)
+        
+        # Calculate mean and confidence intervals
+        mean_loss = np.mean(loss_matrix, axis=0)
+        
+        # Calculate confidence interval
+        if num_runs > 1:
+            # Using t-distribution for small sample sizes
+            from scipy import stats
+            t_value = stats.t.ppf((1 + confidence) / 2, num_runs - 1)
+            std_err = stats.sem(loss_matrix, axis=0)
+            ci_half_width = t_value * std_err
+            lower_ci = mean_loss - ci_half_width
+            upper_ci = mean_loss + ci_half_width
+            
+            # Plot confidence interval as shaded region
+            plt.fill_between(timesteps, lower_ci, upper_ci, color=colors[name], alpha=0.2)
+        
+        # Plot mean loss
+        plt.plot(timesteps, mean_loss, color=colors[name], linewidth=2.5, label=f'{name}')
+    
+    plt.xlabel('Time Step')
+    plt.ylabel('Loss')
+    plt.title(title)
+    if ylim:
+        plt.ylim(ylim)
+    plt.legend(loc=legend_loc)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+
 
 

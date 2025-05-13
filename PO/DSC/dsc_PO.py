@@ -64,13 +64,13 @@ class DSC_PO(torch.nn.Module):
         sigma_i_term = torch.pow(self.sigma_M, 0.25)  # Shape: [H]
         self.register_buffer("sigma_phi_M", sigma_i_term.view(self.H, 1) * self.phi_M.T)  # Shape: [H, M]
         
-        # First term parameters: M_{0j} for the first summation
+        # First term parameters: M_{0j} for the first summations
         # Shape: [m_control, h, n] (control dimensions, h1 filter dimensions, state dimensions)
-        self.M0 = torch.nn.Parameter(torch.ones(self.m_control, self.h, self.n))
+        self.M0 = torch.nn.Parameter(torch.ones(self.m_control, self.h, self.n)* 1e-14)
         
         # Second term parameters: M_{ij} for the second summation
         # Shape: [m_control, H, h, n] (control dimensions, h2 filter dimensions, h1 filter dimensions, state dimensions)
-        self.M_tensor = torch.nn.Parameter(torch.ones(self.m_control, self.H, self.h, self.n))
+        self.M_tensor = torch.nn.Parameter(torch.ones(self.m_control, self.H, self.h, self.n) * 1e-14) # * 1e-14
         
         self.bias = torch.nn.Parameter(torch.zeros(self.m_control, 1))
         

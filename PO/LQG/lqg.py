@@ -7,7 +7,7 @@ from torch.nn.functional import relu, leaky_relu
 from PO.utils import lqr
 
 class LQG(torch.nn.Module):
-    def __init__(self, A, B, C, Q, Q_noise, R, R_noise, h, eta=0.001, T=1000, name="LQG", nl=False):
+    def __init__(self, A, B, C, Q, Q_noise, R, R_noise, h, eta=0.001, T=500, name="LQG", nl=False):
 
         super().__init__()
         self.name = name
