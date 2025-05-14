@@ -236,7 +236,7 @@ class DSC(torch.nn.Module):
 
                 # STEP 1: Get observation from current state
                 y_obs = self.C @ x  # introduce the y_t as a linear projection of x
-                y_history.append(y_obs)
+                y_history.append(y_obs.detach())
 
                 # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
                 # This is the part of the observation not affected by past controls
@@ -245,20 +245,20 @@ class DSC(torch.nn.Module):
                     A_power_i = torch.matrix_power(self.A, i)
                     y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
                 
-                y_nat_history.append(y_nat_t)
+                y_nat_history.append(y_nat_t.detach())
 
                 # STEP 3: Calculate control using LQR + learned perturbation compensation
                 # TODO: figure out control here
                 if use_control:
                     u_nominal = -self.K @ y_obs
-                    u_pert = self.compute_control_vectorized()
-                    u = u_nominal + u_pert + self.bias
+                    u_pert = self.compute_control_vectorized(y_nat_history)
+                    u_t = u_nominal + u_pert
         
                 else: 
                     # If use_control is False, use zero control for compatibility
-                    u = torch.zeros((self.m_control, 1), device=self.device)
+                    u_t = torch.zeros((self.m_control, 1), device=self.device)
                 
-                u_history.append(u_t)
+                u_history.append(u_t.detach())
 
                 # STEP 4: Get or compute perturbation for next state
                 if add_noise:
@@ -269,6 +269,8 @@ class DSC(torch.nn.Module):
                         w_t = noise_dist.sample().view(-1, 1)
                 else: w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
 
+                x = x.detach()  # Detach to prevent growing the graph over time
+
                 # STEP 5: State update for next time step
                 if self.nl:
                     x_nl = self.nonlinear_dynamics(x)
@@ -277,27 +279,25 @@ class DSC(torch.nn.Module):
                 
                 # STEP 6: Compute quadratic cost
                 cost = y_obs.t() @ self.Q_obs @ y_obs.t() + u_t.t() @ self.R @ u_t
-                self.losses[t] = cost.item()
+                costs[t] = cost.detach().item()
+
+                # Maintain fixed-length history
+                max_history = max(self.m, self.m_tilde) + 2  # +2 for padding
+                if len(u_history) > max_history: u_history.pop(0)
+                if len(y_history) > max_history: y_history.pop(0)
+                if len(y_nat_history) > max_history: y_nat_history.pop(0)
 
                 if use_control:
                     # Use autograd for gradient computation
                     optimizer.zero_grad()
                     cost.backward()
                     optimizer.step()
+                    scheduler.step()
                     
-                
-                # Maintain fixed-length history
-                max_history = max(self.m, self.m_tilde) + 2  # +2 for padding
-                if len(u_history) > max_history: u_history.pop(0)
-                if len(y_history) > max_history: y_history.pop(0)
-                if len(y_nat_history) > max_history: y_nat_history.pop(0)
-                            
+            # Store costs for this trial               
             all_costs[trial, :] = costs
 
-            # Step the scheduler after each trial
-            scheduler.step()
-
-            # Store average costs if multiple trials
+        # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)
         else: self.losses = all_costs[0]
             

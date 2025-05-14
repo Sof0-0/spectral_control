@@ -7,16 +7,19 @@ from scipy.linalg import solve_discrete_are
 
 
 class GRC(torch.nn.Module):
-    def __init__(self, A, B, C, Q, R, Q_noise=None, R_noise=None, h=3, T=100, name="GRC", lr=0.01):
+    def __init__(self, A, B, C, Q, Q_obs, R, Q_noise=None, R_noise=None, h=3, T=100, name="GRC", lr=0.01):
         super().__init__()
         self.name = name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.nl = False
+        self.eta = lr
         
         # Register system matrices as buffers
         self.register_buffer("A", torch.tensor(A, dtype=torch.float32))
         self.register_buffer("B", torch.tensor(B, dtype=torch.float32))
         self.register_buffer("C", torch.tensor(C, dtype=torch.float32))
         self.register_buffer("Q", torch.tensor(Q, dtype=torch.float32))
+        self.register_buffer("Q_obs", torch.tensor(Q_obs, dtype=torch.float32))
         self.register_buffer("R", torch.tensor(R, dtype=torch.float32))
         
         # Store noise parameters for compatibility with LQG
@@ -26,7 +29,7 @@ class GRC(torch.nn.Module):
         if R_noise is not None: self.register_buffer("R_noise", torch.tensor(R_noise, dtype=torch.float32))
         else: self.register_buffer("R_noise", torch.eye(C.shape[0], dtype=torch.float32) * 1e-1)
         
-        self.n = A.shape[0]   # hidden state dimension
+        self.d = A.shape[0]   # hidden state dimension
         self.m_control = B.shape[1]  # control input dimension
         self.p = C.shape[0]  # observation dimension
         
@@ -50,23 +53,34 @@ class GRC(torch.nn.Module):
         
         # Store costs for multiple trials
         all_costs = torch.zeros((num_trials, self.T), dtype=torch.float32, device=self.device)
+
+
+        # Weight decay for stability
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.eta, weight_decay=1e-5)
+
+             # Learning rate schedule: start low, increase, then decrease
+        def lr_lambda(epoch):
+            if epoch < 10: return 0.1  # Start with lower learning rate
+            elif epoch < 50: return 1.0  # Full learning rate for main training period
+            else: return max(0.1, 1.0 - (epoch - 50) / 100)  # Gradual decrease
+
+        scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         
         for trial in range(num_trials):
             # Initialize state
             if initial_state is not None: x = initial_state.to(self.device)
-            else: x = torch.randn(self.n, 1, dtype=torch.float32, device=self.device)
+            else: x = torch.randn(self.d, 1, dtype=torch.float32, device=self.device)
             
             # Initialize histories for observations and controls
             u_history = [torch.zeros((self.m_control, 1), device=self.device) for _ in range(self.h+1)]
             y_history = [torch.zeros((self.p, 1), device=self.device) for _ in range(self.h+1)]
             y_nat_history = [torch.zeros((self.p, 1), device=self.device) for _ in range(self.h+1)]
             
-            costs = torch.zeros(self.T, dtype=torch.float32, device=self.device)
-            
+            costs = torch.zeros(self.T, dtype=torch.float32, device=self.device)            
             for t in range(self.T):
              
                 y_obs = self.C @ x    # Get observation
-                y_history.append(y_obs)
+                y_history.append(y_obs.detach())
                 
                 # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
                 # This is the part of the observation not affected by past controls
@@ -75,9 +89,10 @@ class GRC(torch.nn.Module):
                     A_power_i = torch.matrix_power(self.A, i)
                     y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
                 
-                y_nat_history.append(y_nat_t)
+                y_nat_history.append(y_nat_t.detach())
                 
                 # Compute control input u_t = ∑_{i=0}^h M_i^t y_nat_{t-i}
+
                 if use_control:
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
                     for i in range(min(self.h+1, len(y_nat_history))):
@@ -86,51 +101,47 @@ class GRC(torch.nn.Module):
                     # If use_control is False, use zero control for compatibility with LQG
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
                 
-                u_history.append(u_t)
+                u_history.append(u_t.detach())
                 
                 # Generate process noise if needed
                 if add_noise:
                     noise_dist = torch.distributions.MultivariateNormal(
-                        torch.zeros(self.n, device=self.device), 
+                        torch.zeros(self.d, device=self.device), 
                         self.Q_noise
                     )
                     w_t = noise_dist.sample().view(-1, 1)
                 else:
-                    w_t = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+                    w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
                 # Update state
-                x = self.A @ x + self.B @ u_t + w_t
+                if self.nl:
+                    x_nl = self.nonlinear_dynamics(x)
+                    x = self.A @ x_nl + self.B @ u_t + w_t
+                else: x = self.A @ x + self.B @ u_t + w_t
                 
+
+                x = x.detach()  # Detach to prevent growing the graph over time
+
                 # Compute quadratic cost (same as LQG)
-                cost = y_obs.t() @ self.Q @ y_obs + u_t.t() @ self.R @ u_t
-                costs[t] = cost.item()
-                
-                # Update controller matrices using gradient descent
-                if use_control:
-                    # Construct loss gradient
-                    # For simplicity, we use a direct approach for gradient calculation
-                    grad_M = []
-                    for i in range(self.h+1):
-                        if i < len(y_nat_history):
-                            # dL/dM_i = 2 * R * u_t * y_nat_{t-i}^T
-                            dL_dM = 2.0 * (self.R @ u_t @ y_nat_history[-(i+1)].t())
-                            grad_M.append(dL_dM)
-                        else:
-                            grad_M.append(torch.zeros_like(self.M[i]))
-                    
-                    # Update each M_i using gradient descent
-                    for i in range(self.h+1):
-                        # Apply projection to keep controllers in constraint set K
-                        # For simplicity, we just clamp values
-                        updated_M = self.M[i] - self.lr * grad_M[i]
-                
+                cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
+                costs[t] = cost.detach().item()
+
                 # Maintain fixed-length history
                 if len(u_history) > self.h + t + 1: u_history.pop(0)
                 if len(y_history) > self.h + t + 1: y_history.pop(0)
                 if len(y_nat_history) > self.h + t + 1: y_nat_history.pop(0)
                 
+                # Update controller matrices using gradient descent
+                if use_control:
+                    # Construct loss gradient
+                    # Use autograd for gradient computation
+                    optimizer.zero_grad()
+                    cost.backward()
+                    optimizer.step()
+                    scheduler.step()
+
             all_costs[trial, :] = costs
-            
+                     
         # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)
         else: self.losses = all_costs[0]

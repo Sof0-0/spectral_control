@@ -9,7 +9,7 @@ from PO.utils import lqr
 
 
 class LQG(torch.nn.Module):
-    def __init__(self, A, B, C, Q, R, Q_noise, R_noise, T=100, name="LQG", nl=False):
+    def __init__(self, A, B, C, Q, Q_obs, R, Q_noise, R_noise, T=100, name="LQG", nl=False):
         super().__init__()
         self.name = name
         self.nl = nl
@@ -20,6 +20,7 @@ class LQG(torch.nn.Module):
         B = torch.tensor(B, dtype=torch.float32, device=self.device)
         C = torch.tensor(C, dtype=torch.float32, device=self.device)
         Q = torch.tensor(Q, dtype=torch.float32, device=self.device)
+        Q_obs = torch.tensor(Q_obs, dtype=torch.float32, device=self.device)
         R = torch.tensor(R, dtype=torch.float32, device=self.device)
         Q_noise = torch.tensor(Q_noise, dtype=torch.float32, device=self.device)
         R_noise = torch.tensor(R_noise, dtype=torch.float32, device=self.device)
@@ -29,11 +30,12 @@ class LQG(torch.nn.Module):
         self.register_buffer("B", B)
         self.register_buffer("C", C)
         self.register_buffer("Q", Q)
+        self.register_buffer("Q_obs", Q_obs)
         self.register_buffer("R", R)
         self.register_buffer("Q_noise", Q_noise)
         self.register_buffer("R_noise", R_noise)
 
-        self.n = A.shape[0]          # hidden state dimension
+        self.d = A.shape[0]          # hidden state dimension
         self.m_control = B.shape[1]  # control input dimension
         self.p = C.shape[0]          # observation dimension
 
@@ -44,7 +46,7 @@ class LQG(torch.nn.Module):
         self.register_buffer("K", K)
 
         # Compute Kalman gain L
-        kf_P = solve_discrete_are(np.array(A.cpu()).T, np.array(C.cpu()).T, np.array(Q_noise.cpu()) + 1e-1 * np.eye(self.n),np.array(R_noise.cpu()))
+        kf_P = solve_discrete_are(np.array(A.cpu()).T, np.array(C.cpu()).T, np.array(Q_noise.cpu()) + 1e-1 * np.eye(self.d),np.array(R_noise.cpu()))
         #kf_P = solve_discrete_are(np.array(A.cpu()).T, np.array(C.cpu()).T, np.array(Q_noise.cpu()) + np.eye(self.n),np.array(R_noise.cpu()))
 
         kf_P = torch.tensor(kf_P, device=self.device, dtype=torch.float32)
@@ -70,9 +72,9 @@ class LQG(torch.nn.Module):
             
             # Initialize true state and estimated state
             if initial_state is not None: x = initial_state.to(self.device)
-            else: x = torch.randn(self.n, 1, dtype=torch.float32, device=self.device)
+            else: x = torch.randn(self.d, 1, dtype=torch.float32, device=self.device)
             
-            x_hat = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+            x_hat = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
             costs = torch.zeros(self.T, dtype=torch.float32, device=self.device)
             
             for t in range(self.T):
@@ -85,12 +87,12 @@ class LQG(torch.nn.Module):
                 # Generate process noise if needed
                 if add_noise:
                     noise_dist = torch.distributions.MultivariateNormal(
-                        torch.zeros(self.n, device=self.device), 
+                        torch.zeros(self.d, device=self.device), 
                         self.Q_noise
                     ) #multivariate normal (Gaussian) distribution
                     w_t = noise_dist.sample().view(-1, 1) 
                 else:
-                    w_t = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
+                    w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
                 # Update true state
                 if self.nl:
@@ -104,7 +106,7 @@ class LQG(torch.nn.Module):
                 x_hat = self.A @ x_hat + self.B @ u_t + self.L @ (y_obs - self.C @ x_hat)
                 
                 # Compute quadratic cost
-                cost = y_obs.t() @ self.Q @ y_obs + u_t.t() @ self.R @ u_t
+                cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
                 costs[t] = cost.item()
             
             all_costs[trial, :] = costs
