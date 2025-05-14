@@ -6,7 +6,7 @@ from torch.nn.functional import relu, leaky_relu
 
 from PO.utils import lqr, get_hankel_new
 
-class DSC_New(torch.nn.Module):
+class DSC_Old(torch.nn.Module):
     def __init__(self, A, B, C, Q, R, h, H, gamma, eta=0.001, T=500, name="DSC", nl=False):
 
         super().__init__()
