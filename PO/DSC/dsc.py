@@ -64,18 +64,31 @@ class DSC(torch.nn.Module):
         #### FILTERS ######
 
 
-        # Precompute terms for efficiency
-        # For first term: σ_j^{1/4} φ_{jl}
-        sigma_j_term = torch.pow(self.sigma_m, 0.25)  # Shape: [h]
-        self.register_buffer("sigma_phi_m", sigma_j_term.view(self.h, 1) * self.phi_m.T)  # Shape: [h, m]
+         # Initialize controller parameters
+        # M_bar_0: Direct term
+        self.M_bar_0 = torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
         
-        # For second term: σ_i^{1/4} φ_{ik}
-        sigma_i_term = torch.pow(self.sigma_M, 0.25)  # Shape: [H]
-        self.register_buffer("sigma_phi_M", sigma_i_term.view(self.H, 1) * self.phi_M.T)  # Shape: [H, M]
+        # M_bar_i: First summation term
+        self.M_bar = torch.nn.ParameterList([
+            torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
+            for _ in range(self.h_tilde)
+        ])
         
-        # Second term parameters: M_{ij} for the second summation
-        # TODO: figure out matrix Ms inits here
-        # Shape: [m_control, H, h, n] (control dimensions, h2 filter dimensions, h1 filter dimensions, state dimensions)
+        # M_0l: Second summation term
+        self.M_0l = torch.nn.ParameterList([
+            torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
+            for _ in range(self.h + 1)  # Including l=0
+        ])
+        
+        # M_il: Third summation term (double-indexed)
+        self.M_il = torch.nn.ParameterList([
+            torch.nn.ParameterList([
+                torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
+                for _ in range(self.h + 1)  # Including l=0
+            ])
+            for _ in range(self.h_tilde)  # i from 1 to h_tilde
+        ])
+
 
         # Initialize controller matrices M_0 to M_h
         # self.M = torch.nn.ParameterList([
@@ -123,7 +136,7 @@ class DSC(torch.nn.Module):
         return leaky_relu(x)
 
 
-    def compute_control_vectorized(self):
+    def compute_control_vectorized(self, y_nat_history):
         """
         Compute the control input using the updated formula:
         
@@ -132,57 +145,54 @@ class DSC(torch.nn.Module):
               sum_l=0^h sum_k=0^m sigma_l^(1/4) * [phi_l]_k * M_0l * y_nat_{t-k} +
               sum_i=1^h_tilde sum_j=1^m_tilde sum_l=0^h sum_k=0^m (sigma_l*lambda_i)^(1/4) * [phi_l]_k * [varphi_i]_j * M_il * y_nat_{t-j-k}
         """
-        # Get the most recent y_nat - shape: [n, 1]
+         # Make sure we have enough history
+        if len(y_nat_history) < max(self.m, self.m_tilde) + 1:
+            return torch.zeros(self.m_control, 1, device=self.device)
+
+        # Current y_nat (y_nat_t)
+        y_nat_t = y_nat_history[-1]
         
-        # ====== Second Term Computation ======
-        # For the second term, we need to loop through m2 history values
-        # This is difficult to fully vectorize due to the history access
-        second_term = torch.zeros(self.m_control, device=self.device)
+        # First term: M_bar_0 * y_nat_t
+        first_term = self.M_bar_0 @ y_nat_t
         
-        for k in range(min(self.m2, len(self.y_nat_history) - 1)):
-            # Get y_{t-k+1}^{nat} - shape: [n, 1]
-            y_t_minus_k_plus_1_nat = self.y_nat_history[-(k+1)]
-            
-            # Reshape for broadcasting - shape: [n]
-            y_nat_k_flat = y_t_minus_k_plus_1_nat.view(self.d)
-            
-            # Compute the weighted values of M_tensor by y_nat for each state
-            # Shape: [m_control, H, h, n] * [n] -> [m_control, H, h, n]
-            M_tensor_weighted = self.M_tensor * y_nat_k_flat.view(1, 1, 1, self.d)
-            
-            # Sum over the state dimension
-            # Shape: [m_control, H, h, n] -> [m_control, H, h]
-            M_tensor_state_sum = M_tensor_weighted.sum(dim=3)
-            
-            # Get the appropriate row vector from sigma_phi_M
-            # Shape: [H]
-            sigma_phi_M_k = self.sigma_phi_M[:, k]
-            
-            # Multiply with the appropriate sigma_phi term for dimension i
-            # Shape: [m_control, H, h] * [H] -> [m_control, H, h]
-            M_tensor_i_weighted = M_tensor_state_sum * sigma_phi_M_k.view(1, self.H, 1)
-            
-            # For each l in m1, compute the contribution
-            for l in range(self.m):
-                # Get the appropriate column vector from sigma_phi_m
-                # Shape: [h]
-                sigma_phi_m_l = self.sigma_phi_m[:, l]
-                
-                # Multiply with the appropriate sigma_phi term for dimension j
-                # Shape: [m_control, H, h] * [h] -> [m_control, H, h]
-                M_tensor_j_weighted = M_tensor_i_weighted * sigma_phi_m_l.view(1, 1, self.h)
-                
-                # Sum over the H and h dimensions
-                # Shape: [m_control, H, h] -> [m_control]
-                second_term_contrib = M_tensor_j_weighted.sum(dim=(1, 2))
-                
-                # Add to the second term
-                second_term += second_term_contrib
+        # Second term: sum_i=1^h_tilde sum_j=1^m_tilde lambda_i^(1/4) * [varphi_i]_j * M_bar_i * y_nat_{t-j}
+        second_term = torch.zeros(self.m_control, 1, device=self.device)
+        for i in range(self.h_tilde):
+            for j in range(min(self.m_tilde, len(y_nat_history) - 1)):
+                if j < len(y_nat_history) - 1:
+                    y_nat_t_minus_j = y_nat_history[-(j+2)]  # -1 for zero-indexing, -1 for going back j steps
+                    second_term += self.lambda_powered[i] * self.varphi[j, i] * (self.M_bar[i] @ y_nat_t_minus_j)
         
-        # Combine both terms and reshape to [m_control, 1]
-        u_pert = second_term.view(self.m_control, 1)
+        # Third term: sum_l=0^h sum_k=0^m sigma_l^(1/4) * [phi_l]_k * M_0l * y_nat_{t-k}
+        third_term = torch.zeros(self.m_control, 1, device=self.device)
+        for l in range(self.h + 1):  # +1 to include l=0
+            sigma_factor = 1.0 if l == 0 else self.sigma_powered[l-1]  # Special case for l=0
+            for k in range(min(self.m, len(y_nat_history) - 1)):
+                if k < len(y_nat_history) - 1:
+                    y_nat_t_minus_k = y_nat_history[-(k+2)]  # -1 for zero-indexing, -1 for going back k steps
+                    phi_factor = 1.0 if l == 0 else self.phi[k, l-1]  # Special case for l=0
+                    third_term += sigma_factor * phi_factor * (self.M_0l[l] @ y_nat_t_minus_k)
         
-        return u_pert
+        # Fourth term: sum_i=1^h_tilde sum_j=1^m_tilde sum_l=0^h sum_k=0^m (sigma_l*lambda_i)^(1/4) * [phi_l]_k * [varphi_i]_j * M_il * y_nat_{t-j-k}
+        fourth_term = torch.zeros(self.m_control, 1, device=self.device)
+        for i in range(self.h_tilde):
+            for j in range(min(self.m_tilde, len(y_nat_history) - 1)):
+                for l in range(self.h + 1):  # +1 to include l=0
+                    for k in range(min(self.m, len(y_nat_history) - j - 1)):
+                        idx = j + k + 2  # +2 for zero-indexing and for going back j+k steps
+                        if idx < len(y_nat_history):
+                            y_nat_t_minus_j_minus_k = y_nat_history[-idx]
+                            
+                            # Special cases for l=0
+                            combined_factor = self.lambda_powered[i] if l == 0 else self.combined_powered[l-1, i]
+                            phi_factor = 1.0 if l == 0 else self.phi[k, l-1]
+                            
+                            fourth_term += combined_factor * phi_factor * self.varphi[j, i] * (self.M_il[i][l] @ y_nat_t_minus_j_minus_k)
+        
+        # Combine all terms
+        u = first_term + second_term + third_term + fourth_term
+        
+        return u
 
     def run(self, initial_state=None, add_noise=False, use_control=True, num_trials=1):
         """Run the controller for T time steps"""
@@ -193,6 +203,13 @@ class DSC(torch.nn.Module):
 
         # Weight decay for stability
         optimizer = torch.optim.Adam(self.parameters(), lr=self.eta, weight_decay=1e-5)
+
+             # Learning rate schedule: start low, increase, then decrease
+        def lr_lambda(epoch):
+            if epoch < 10: return 0.1  # Start with lower learning rate
+            elif epoch < 50: return 1.0  # Full learning rate for main training period
+            else: return max(0.1, 1.0 - (epoch - 50) / 100)  # Gradual decrease
+
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         
         # Learning rate schedule: start low, increase, then decrease
@@ -262,33 +279,23 @@ class DSC(torch.nn.Module):
                 cost = y_obs.t() @ self.Q_obs @ y_obs.t() + u_t.t() @ self.R @ u_t
                 self.losses[t] = cost.item()
 
-                if use_control: # TODO: figure this update out 
-
-                    # Construct loss gradient
-                    # For simplicity, we use a direct approach for gradient calculation
-                    grad_M = []
-                    for i in range(self.h+1):
-                        if i < len(y_nat_history):
-                            # dL/dM_i = 2 * R * u_t * y_nat_{t-i}^T
-                            dL_dM = 2.0 * (self.R @ u_t @ y_nat_history[-(i+1)].t())
-                            grad_M.append(dL_dM)
-                        else:
-                            grad_M.append(torch.zeros_like(self.M[i]))
+                if use_control:
+                    # Use autograd for gradient computation
+                    optimizer.zero_grad()
+                    cost.backward()
+                    optimizer.step()
                     
-                    # Update each M_i using gradient descent
-                    for i in range(self.h+1):
-                        # Apply projection to keep controllers in constraint set K
-                        # For simplicity, we just clamp values
-                        updated_M = self.M[i] - self.lr * grad_M[i]
                 
                 # Maintain fixed-length history
-                if len(u_history) > self.h + t + 1: u_history.pop(0)
-                if len(y_history) > self.h + t + 1: y_history.pop(0)
-                if len(y_nat_history) > self.h + t + 1: y_nat_history.pop(0)
+                max_history = max(self.m, self.m_tilde) + 2  # +2 for padding
+                if len(u_history) > max_history: u_history.pop(0)
+                if len(y_history) > max_history: y_history.pop(0)
+                if len(y_nat_history) > max_history: y_nat_history.pop(0)
                             
-          
-
             all_costs[trial, :] = costs
+
+            # Step the scheduler after each trial
+            scheduler.step()
 
             # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)
