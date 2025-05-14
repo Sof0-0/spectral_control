@@ -25,7 +25,7 @@ class LQG(torch.nn.Module):
         R_noise = torch.tensor(R_noise, dtype=torch.float32, device=self.device)
 
         # Register system matrices as buffers
-        self.register_buffer("A", A)
+        self.register_buffer("A", A) 
         self.register_buffer("B", B)
         self.register_buffer("C", C)
         self.register_buffer("Q", Q)
@@ -33,9 +33,9 @@ class LQG(torch.nn.Module):
         self.register_buffer("Q_noise", Q_noise)
         self.register_buffer("R_noise", R_noise)
 
-        self.n = A.shape[0]  # state dimension
+        self.n = A.shape[0]          # hidden state dimension
         self.m_control = B.shape[1]  # control input dimension
-        self.p = C.shape[0]  # observation dimension
+        self.p = C.shape[0]          # observation dimension
 
         # Compute LQR gain K
         P = solve_discrete_are(np.array(A.cpu()), np.array(B.cpu()), np.array(Q.cpu()), np.array(R.cpu()))
@@ -44,11 +44,9 @@ class LQG(torch.nn.Module):
         self.register_buffer("K", K)
 
         # Compute Kalman gain L
-        kf_P = solve_discrete_are(
-            np.array(A.cpu()).T, np.array(C.cpu()).T,
-            np.array(Q_noise.cpu()) + 1e-12 * np.eye(self.n),
-            np.array(R_noise.cpu())
-        )
+        kf_P = solve_discrete_are(np.array(A.cpu()).T, np.array(C.cpu()).T, np.array(Q_noise.cpu()) + 1e-1 * np.eye(self.n),np.array(R_noise.cpu()))
+        #kf_P = solve_discrete_are(np.array(A.cpu()).T, np.array(C.cpu()).T, np.array(Q_noise.cpu()) + np.eye(self.n),np.array(R_noise.cpu()))
+
         kf_P = torch.tensor(kf_P, device=self.device, dtype=torch.float32)
         L = kf_P @ self.C.t() @ torch.inverse(self.C @ kf_P @ self.C.t() + self.R_noise)
         self.register_buffer("L", L)
@@ -61,15 +59,7 @@ class LQG(torch.nn.Module):
         return leaky_relu(x)
 
     def run(self, initial_state=None, add_noise=False, use_control=True, num_trials=1):
-        """
-        Run the LQG controller simulation
-        
-        Args:
-            initial_state: Initial state (if None, will be random or zero based on random_initial_state)
-            add_noise: Whether to add process noise
-            use_control: Whether to use the LQG controller (if False, zero control is used)
-            num_trials: Number of trials to run
-        """
+
         self.to(self.device)
         
         # Store costs for multiple trials
@@ -86,8 +76,8 @@ class LQG(torch.nn.Module):
             costs = torch.zeros(self.T, dtype=torch.float32, device=self.device)
             
             for t in range(self.T):
-                # Get observation
-                y_obs = self.C @ x
+               
+                y_obs = self.C @ x  # Get observation
                 
                 # Calculate control using LQR based on estimated state
                 u_t = -self.K @ x_hat if use_control else torch.zeros((self.m_control, 1), device=self.device)
@@ -97,8 +87,8 @@ class LQG(torch.nn.Module):
                     noise_dist = torch.distributions.MultivariateNormal(
                         torch.zeros(self.n, device=self.device), 
                         self.Q_noise
-                    )
-                    w_t = noise_dist.sample().view(-1, 1)
+                    ) #multivariate normal (Gaussian) distribution
+                    w_t = noise_dist.sample().view(-1, 1) 
                 else:
                     w_t = torch.zeros(self.n, 1, dtype=torch.float32, device=self.device)
                 

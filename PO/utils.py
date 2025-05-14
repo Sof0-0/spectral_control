@@ -42,7 +42,7 @@ def make_diagonalizable_matrix(n):
     return A
 
 
-def plot_loss_comparison(controllers, labels, title, window_size=10):
+def plot_loss_comparison(controllers, labels, title, window_size=10, save_path=None):
     """
     Plot the moving average of multiple controllers' losses over time.
 
@@ -71,6 +71,11 @@ def plot_loss_comparison(controllers, labels, title, window_size=10):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')  # High-quality save
+
     plt.show()
 
 
