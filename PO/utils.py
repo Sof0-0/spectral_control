@@ -454,61 +454,80 @@ def run_multiple_models_with_params(controller_configs, num_runs=10, seed_base=0
     
     return all_results
 
-def plot_multiple_models_with_ci(results_dict, title, colors=None, confidence=0.95, 
-                                legend_loc='best', figsize=(12, 7), ylim=None):
+def plot_loss_comparison_with_ci(controllers, labels, title, window_size=10, confidence=0.95, save_path=None):
     """
-    Plot multiple controllers' losses with mean and confidence intervals
+    Plot the moving average of multiple controllers' losses over time with confidence intervals.
     
     Parameters:
-    results_dict (dict): Dictionary of {name: loss_matrix}
-    title (str): Plot title
-    colors (dict, optional): Dictionary mapping controller names to colors
-    confidence (float): Confidence interval level (default: 0.95 for 95%)
-    legend_loc (str): Location of the legend
-    figsize (tuple): Figure size
-    ylim (tuple, optional): Y-axis limits (min, max)
+    - controllers: list of controller objects with .losses attribute storing a tensor of shape [num_trials, T]
+                  where each row is a trial and each column is a time step
+    - labels: list of labels for the legend
+    - title: title for the plot
+    - window_size: window size for computing moving average
+    - confidence: confidence level for the interval (default: 0.95 for 95% CI)
+    - save_path: path to save the figure (optional)
     """
-    plt.figure(figsize=figsize)
     
-    if colors is None:
-        # Default colormap if no colors provided
-        color_list = plt.cm.tab10.colors
-        colors = {name: color_list[i % len(color_list)] 
-                 for i, name in enumerate(results_dict.keys())}
+    plt.figure(figsize=(12, 7))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(controllers)))
     
-    for name, loss_matrix in results_dict.items():
-        num_runs, T = loss_matrix.shape
-        timesteps = np.arange(T)
+    for i, (controller, label) in enumerate(zip(controllers, labels)):
+        # Get all trials data
+        # We assume losses is of shape [num_trials, T]
+        # If it's not, reshape it accordingly
+        if len(controller.losses.shape) == 1:
+            # If losses is just a vector, we need to reshape it to [1, T]
+            losses_np = controller.losses.cpu().numpy().reshape(1, -1)
+        else:
+            losses_np = controller.losses.cpu().numpy()
+        
+        num_trials, T = losses_np.shape
+        
+        if T < window_size:
+            raise ValueError("Window size should be smaller than the length of the loss sequence.")
+        
+        # Apply moving average to each trial
+        smoothed_losses = np.zeros((num_trials, T - window_size + 1))
+        for j in range(num_trials):
+            smoothed_losses[j] = np.convolve(losses_np[j], np.ones(window_size)/window_size, mode='valid')
         
         # Calculate mean and confidence intervals
-        mean_loss = np.mean(loss_matrix, axis=0)
+        mean_losses = np.mean(smoothed_losses, axis=0)
         
-        # Calculate confidence interval
-        if num_runs > 1:
-            # Using t-distribution for small sample sizes
-            from scipy import stats
-            t_value = stats.t.ppf((1 + confidence) / 2, num_runs - 1)
-            std_err = stats.sem(loss_matrix, axis=0)
-            ci_half_width = t_value * std_err
-            lower_ci = mean_loss - ci_half_width
-            upper_ci = mean_loss + ci_half_width
-            
-            # Plot confidence interval as shaded region
-            plt.fill_between(timesteps, lower_ci, upper_ci, color=colors[name], alpha=0.2)
+        # Calculate the confidence interval
+        if num_trials > 1:
+            # Use t-distribution when we have multiple trials
+            t_value = stats.t.ppf((1 + confidence) / 2, num_trials - 1)
+            std_err = stats.sem(smoothed_losses, axis=0)
+            margin_error = t_value * std_err
+            lower_bound = mean_losses - margin_error
+            upper_bound = mean_losses + margin_error
+        else:
+            # If only one trial, we can't compute CI
+            lower_bound = mean_losses
+            upper_bound = mean_losses
         
-        # Plot mean loss
-        plt.plot(timesteps, mean_loss, color=colors[name], linewidth=2.5, label=f'{name}')
+        # Plotting
+        x_values = np.arange(window_size - 1, T)
+        plt.plot(x_values, mean_losses, label=label, color=colors[i], linewidth=2)
+        
+        if num_trials > 1:
+            plt.fill_between(x_values, lower_bound, upper_bound, color=colors[i], alpha=0.2)
     
     plt.xlabel('Time Step')
-    plt.ylabel('Loss')
-    plt.title(title)
-    if ylim:
-        plt.ylim(ylim)
-    plt.legend(loc=legend_loc)
-    plt.grid(True)
+    plt.ylabel(f'{window_size}-Step Average Loss')
+    plt.title(f"{title}\n(with {confidence*100:.0f}% Confidence Intervals, {num_trials} trials)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
     plt.show()
-
+    
+    return mean_losses, lower_bound, upper_bound
 
 
 
