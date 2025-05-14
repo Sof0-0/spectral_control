@@ -41,6 +41,39 @@ def make_diagonalizable_matrix(n):
     A = P @ D @ np.linalg.inv(P)  # A = P D P^-1
     return A
 
+
+def plot_loss_comparison(controllers, labels, title, window_size=10):
+    """
+    Plot the moving average of multiple controllers' losses over time.
+
+    Parameters:
+    - controllers: list of controller objects with .losses attribute
+    - labels: list of labels for the legend
+    - title: title for the plot
+    - window_size: window size for computing moving average
+    """
+    plt.figure(figsize=(10, 6))
+    
+    for controller, label in zip(controllers, labels):
+        losses = controller.losses.cpu().numpy()
+        T = len(losses)
+        
+        if T < window_size:
+            raise ValueError("Window size should be smaller than the length of the loss sequence.")
+        
+        # Compute moving average using convolution
+        moving_avg = np.convolve(losses, np.ones(window_size)/window_size, mode='valid')
+        plt.plot(np.arange(window_size - 1, T), moving_avg, label=label)
+    
+    plt.xlabel('Time Step')
+    plt.ylabel(f'{window_size}-Step Average Loss')
+    plt.title(title)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
 def make_diagonalizable_matrix_complex(n):
     """ Generate a diagonalizable matrix A with some complex eigenvalues. """
     assert n % 2 == 0, "For complex eigenvalues, use an even n to ensure conjugate pairs."
