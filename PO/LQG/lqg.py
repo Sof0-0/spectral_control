@@ -83,7 +83,7 @@ class LQG(torch.nn.Module):
                 
                 # Calculate control using LQR based on estimated state
                 u_t = -self.K @ x_hat if use_control else torch.zeros((self.m_control, 1), device=self.device)
-                
+
                 # Generate process noise if needed
                 if add_noise:
                     noise_dist = torch.distributions.MultivariateNormal(
@@ -104,7 +104,6 @@ class LQG(torch.nn.Module):
                 # Update state estimate using Kalman filter
                 # x̂_{t+1} = A x̂_t + B u_t + L (y_t - C x̂_t)
                 x_hat = self.A @ x_hat + self.B @ u_t + self.L @ (y_obs - self.C @ x_hat)
-                
                 # Compute quadratic cost
                 cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
                 costs[t] = cost.item()

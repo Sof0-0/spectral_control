@@ -5,9 +5,11 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.functional import relu, leaky_relu
 from scipy.linalg import solve_discrete_are
 
+from PO.utils import lqr
+
 
 class GRC(torch.nn.Module):
-    def __init__(self, A, B, C, Q, Q_obs, R, Q_noise=None, R_noise=None, h=3, T=100, name="GRC", lr=0.01):
+    def __init__(self, A, B, C, Q, Q_obs, R, Q_noise=None, R_noise=None, h=3, T=100, name="GRC", lr=0.001):
         super().__init__()
         self.name = name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,6 +22,7 @@ class GRC(torch.nn.Module):
         self.register_buffer("C", torch.tensor(C, dtype=torch.float32))
         self.register_buffer("Q", torch.tensor(Q, dtype=torch.float32))
         self.register_buffer("Q_obs", torch.tensor(Q_obs, dtype=torch.float32))
+        self.register_buffer("K", torch.tensor(lqr(A, B, Q, R), dtype=torch.float32))
         self.register_buffer("R", torch.tensor(R, dtype=torch.float32))
         
         # Store noise parameters for compatibility with LQG
@@ -27,7 +30,7 @@ class GRC(torch.nn.Module):
         else: self.register_buffer("Q_noise", torch.eye(A.shape[0], dtype=torch.float32))
             
         if R_noise is not None: self.register_buffer("R_noise", torch.tensor(R_noise, dtype=torch.float32))
-        else: self.register_buffer("R_noise", torch.eye(C.shape[0], dtype=torch.float32) * 1e-1)
+        else: self.register_buffer("R_noise", torch.eye(C.shape[0], dtype=torch.float32) * 1e-15)
         
         self.d = A.shape[0]   # hidden state dimension
         self.m_control = B.shape[1]  # control input dimension
@@ -39,7 +42,7 @@ class GRC(torch.nn.Module):
         
         # Initialize controller matrices M_0 to M_h
         self.M = torch.nn.ParameterList([
-            torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
+            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 1e-2)
             for _ in range(h+1)
         ])
         
@@ -80,7 +83,7 @@ class GRC(torch.nn.Module):
             for t in range(self.T):
              
                 y_obs = self.C @ x    # Get observation
-                y_history.append(y_obs.detach())
+                y_history.append(y_obs)
                 
                 # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
                 # This is the part of the observation not affected by past controls
@@ -89,7 +92,7 @@ class GRC(torch.nn.Module):
                     A_power_i = torch.matrix_power(self.A, i)
                     y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
                 
-                y_nat_history.append(y_nat_t.detach())
+                y_nat_history.append(y_nat_t)
                 
                 # Compute control input u_t = ∑_{i=0}^h M_i^t y_nat_{t-i}
 
@@ -100,8 +103,9 @@ class GRC(torch.nn.Module):
                 else:
                     # If use_control is False, use zero control for compatibility with LQG
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
-                
-                u_history.append(u_t.detach())
+
+                #u_t += -self.K @ x 
+                u_history.append(u_t)
                 
                 # Generate process noise if needed
                 if add_noise:
@@ -110,18 +114,18 @@ class GRC(torch.nn.Module):
                         self.Q_noise
                     )
                     w_t = noise_dist.sample().view(-1, 1)
-                else:
-                    w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
+                else: w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
                 # Update state
                 if self.nl:
                     x_nl = self.nonlinear_dynamics(x)
                     x = self.A @ x_nl + self.B @ u_t + w_t
                 else: x = self.A @ x + self.B @ u_t + w_t
-                
 
                 x = x.detach()  # Detach to prevent growing the graph over time
 
+                #print(u_t.shape, y_obs.shape, x.shape)
+                #print(self.Q_obs.shape, self.R.shape)
                 # Compute quadratic cost (same as LQG)
                 cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
                 costs[t] = cost.detach().item()
@@ -131,14 +135,14 @@ class GRC(torch.nn.Module):
                 if len(y_history) > self.h + t + 1: y_history.pop(0)
                 if len(y_nat_history) > self.h + t + 1: y_nat_history.pop(0)
                 
-                # Update controller matrices using gradient descent
-                if use_control:
-                    # Construct loss gradient
-                    # Use autograd for gradient computation
-                    optimizer.zero_grad()
-                    cost.backward()
-                    optimizer.step()
-                    scheduler.step()
+            # Update controller matrices using gradient descent
+            if use_control:
+                # Construct loss gradient
+                # Use autograd for gradient computation
+                optimizer.zero_grad()
+                cost.backward()
+                optimizer.step()
+                scheduler.step()
 
             all_costs[trial, :] = costs
                      
