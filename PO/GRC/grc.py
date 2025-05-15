@@ -38,11 +38,11 @@ class GRC(torch.nn.Module):
         
         # GRC specific parameters
         self.h = h  # History length
-        self.lr = lr  # Learning rate (eta in the algorithm)
+        self.lr = 0.1  # Learning rate (eta in the algorithm)
         
         # Initialize controller matrices M_0 to M_h
         self.M = torch.nn.ParameterList([
-            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 1e-2)
+            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 0.001)
             for _ in range(h+1)
         ])
         
@@ -100,13 +100,15 @@ class GRC(torch.nn.Module):
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
                     for i in range(min(self.h+1, len(y_nat_history))):
                         u_t += self.M[i] @ y_nat_history[-(i+1)]
+                        #print("UTS", u_t)
                 else:
                     # If use_control is False, use zero control for compatibility with LQG
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
 
-                #u_t += -self.K @ x 
+                u_t += -self.K @ x 
                 u_history.append(u_t)
-                
+
+
                 # Generate process noise if needed
                 if add_noise:
                     noise_dist = torch.distributions.MultivariateNormal(
@@ -122,29 +124,37 @@ class GRC(torch.nn.Module):
                     x = self.A @ x_nl + self.B @ u_t + w_t
                 else: x = self.A @ x + self.B @ u_t + w_t
 
-                x = x.detach()  # Detach to prevent growing the graph over time
+                #x = x.detach()  # Detach to prevent growing the graph over time
 
                 #print(u_t.shape, y_obs.shape, x.shape)
                 #print(self.Q_obs.shape, self.R.shape)
                 # Compute quadratic cost (same as LQG)
                 cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
-                costs[t] = cost.detach().item()
+                costs[t] = cost.item()
 
                 # Maintain fixed-length history
                 if len(u_history) > self.h + t + 1: u_history.pop(0)
                 if len(y_history) > self.h + t + 1: y_history.pop(0)
                 if len(y_nat_history) > self.h + t + 1: y_nat_history.pop(0)
+
+                #u_history.append(u_t)
                 
             # Update controller matrices using gradient descent
-            if use_control:
+            if use_control and t >= 10:
+                #print("HERE")
                 # Construct loss gradient
                 # Use autograd for gradient computation
                 optimizer.zero_grad()
                 cost.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)  # Add gradient clipping
                 optimizer.step()
                 scheduler.step()
+                
 
             all_costs[trial, :] = costs
+
+            x = x.detach()
+            
                      
         # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)
