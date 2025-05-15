@@ -66,8 +66,8 @@ class DSC(torch.nn.Module):
 
 
 
-        self.M_tilde = torch.nn.Parameter(torch.zeros(self.h, self.m, self.m_control, self.p, device=self.device)) 
-        self.M = torch.nn.Parameter(torch.zeros(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device)) 
+        self.M_tilde = torch.nn.Parameter(torch.ones(self.h, self.m, self.m_control, self.p, device=self.device) * 0.001) 
+        self.M = torch.nn.Parameter(torch.ones(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device) * 0.001) 
 
         # self.M_tilde = torch.nn.Parameter(torch.zeros(self.h, self.m, self.m_control, self.p, device=self.device))  # (h, m, m_c, p)
         # self.M = torch.nn.Parameter(torch.zeros(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device))  # (h, m, h, m, m_c, p)
@@ -80,6 +80,31 @@ class DSC(torch.nn.Module):
     def nonlinear_dynamics(self, x):
         """Apply nonlinear dynamics if nl flag is True"""
         return leaky_relu(x)
+
+    def compute_natural_observation(self, y_history, u_history):
+        """
+        Compute y^nat_t = y_t - C ∑_{i=0}^{t} A^i B u_{t-i}
+        This removes the effects of control from the observation
+        """
+        t = len(y_history) - 1
+        
+        # Start with the current observation
+        y_nat = y_history[-1].clone()
+        
+        # Subtract the effect of previous controls
+        for i in range(min(t+1, len(u_history))):
+            if i >= len(u_history):
+                break
+                
+            # Compute A^i
+            A_i = torch.eye(self.d, device=self.device)
+            for _ in range(i):
+                A_i = self.A @ A_i
+                
+            # Subtract C * A^i * B * u_{t-i}
+            y_nat = y_nat - self.C @ A_i @ self.B @ u_history[-(i+1)]
+            
+        return y_nat
 
 
     def compute_control_vectorized(self, y_nat_history):
@@ -173,7 +198,7 @@ class DSC(torch.nn.Module):
                 # STEP 1: Get observation from current state
                 y_obs = self.C @ x  # introduce the y_t as a linear projection of x
                 y_history.append(y_obs.detach())
-                print("HERE")
+                #print("HERE")
 
                 # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
                 # This is the part of the observation not affected by past controls
@@ -183,7 +208,7 @@ class DSC(torch.nn.Module):
                     y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
                 
                 y_nat_history.append(y_nat_t)
-                print(len(y_nat_history))
+                #print(len(y_nat_history))
 
                 # STEP 3: Calculate control using LQR + learned perturbation compensation
                 if use_control:
@@ -192,7 +217,7 @@ class DSC(torch.nn.Module):
         
                 else:  u_t = torch.zeros((self.m_control, 1), device=self.device)
             
-                u_t += -self.K @ x 
+                #u_t += -self.K @ x 
                 u_history.append(u_t)
                 #print(u_history)
 
@@ -213,7 +238,7 @@ class DSC(torch.nn.Module):
                     x = self.A @ x_nl + self.B @ u_t + w_t
                 else: x = self.A @ x + self.B @ u_t + w_t
 
-                x = x.detach()  # Detach to prevent growing the graph over time
+                #x = x.detach()  # Detach to prevent growing the graph over time
 
                 # STEP 6: Compute quadratic cost
 
@@ -241,6 +266,8 @@ class DSC(torch.nn.Module):
 
           
             all_costs[trial, :] = costs
+
+            x = x.detach()
 
         # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)

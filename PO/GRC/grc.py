@@ -42,7 +42,7 @@ class GRC(torch.nn.Module):
         
         # Initialize controller matrices M_0 to M_h
         self.M = torch.nn.ParameterList([
-            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 0.001)
+            torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
             for _ in range(h+1)
         ])
         
@@ -105,7 +105,7 @@ class GRC(torch.nn.Module):
                     # If use_control is False, use zero control for compatibility with LQG
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
 
-                u_t += -self.K @ x 
+                #u_t += -self.K @ x 
                 u_history.append(u_t)
 
 
@@ -153,7 +153,7 @@ class GRC(torch.nn.Module):
 
             all_costs[trial, :] = costs
 
-            x = x.detach()
+            #x = x.detach()
             
                      
         # Store average costs if multiple trials
