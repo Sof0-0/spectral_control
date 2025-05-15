@@ -51,43 +51,18 @@ class DSC(torch.nn.Module):
         eigvals_m, eigvecs_m = torch.linalg.eigh(Z_m)
         
         # Register eigenvalues and eigenvectors for columns
-        self.register_buffer("sigma_m", eigvals_m[-self.h:].clone().detach().to(torch.float32))  # Top-h eigenvalues
-        self.register_buffer("phi_m", eigvecs_m[:, -self.h:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+        self.register_buffer("sigma", eigvals_m[-self.h:].clone().detach().to(torch.float32))  # Top-h eigenvalues
+        self.register_buffer("phi", eigvecs_m[:, -self.h:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
         
         # Compute Hankel matrix for rows
         Z_m_tilde = get_hankel_new(self.m_tilde, self.gamma)
         eigvals_m_tilde, eigvecs_m_tilde = torch.linalg.eigh(Z_m_tilde)
         
         # Register eigenvalues and eigenvectors for rows
-        self.register_buffer("sigma_m_tilde", eigvals_m_tilde[-self.h_tilde:].clone().detach().to(torch.float32))  # Top-H eigenvalues
-        self.register_buffer("phi_m_tilde", eigvecs_m_tilde[:, -self.h_tilde:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+        self.register_buffer("lambda_e", eigvals_m_tilde[-self.h_tilde:].clone().detach().to(torch.float32))  # Top-H eigenvalues
+        self.register_buffer("phi_tilde", eigvecs_m_tilde[:, -self.h_tilde:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
         #### FILTERS ######
 
-
-         # Initialize controller parameters
-        # M_bar_0: Direct term
-        # self.M_bar_0 = torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
-        
-        # # M_bar_i: First summation term
-        # self.M_bar = torch.nn.ParameterList([
-        #     torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
-        #     for _ in range(self.h_tilde)
-        # ])
-        
-        # # M_0l: Second summation term
-        # self.M_0l = torch.nn.ParameterList([
-        #     torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
-        #     for _ in range(self.h + 1)  # Including l=0
-        # ])
-        
-        # # M_il: Third summation term (double-indexed)
-        # self.M_il = torch.nn.ParameterList([
-        #     torch.nn.ParameterList([
-        #         torch.nn.Parameter(torch.zeros(self.m_control, self.p, device=self.device))
-        #         for _ in range(self.h + 1)  # Including l=0
-        #     ])
-        #     for _ in range(self.h_tilde)  # i from 1 to h_tilde
-        # ])
 
 
         # Initialize controller matrices M_0 to M_h
@@ -102,8 +77,33 @@ class DSC(torch.nn.Module):
         #     for _ in range(h+1)
         # ])
 
-        self.M_tilde = torch.nn.Parameter(torch.zeros(self.h, self.m, self.m_control, self.p, device=self.device))  # (h, m, m_c, p)
-        self.M = torch.nn.Parameter(torch.zeros(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device))  # (h, m, h, m, m_c, p)
+        # self.M_tilde = torch.nn.Parameter(torch.ones(self.h, self.m, self.m_control, self.p, device=self.device) * 1e-2)  # (h, m, m_c, p)
+        # self.M = torch.nn.Parameter(torch.ones(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device) * 1e-2)  # (h, m, h, m, m_c, p)
+
+         # Initialize controller matrices according to the control law formula
+        # First term: M_0^t
+        self.M_0 = torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 1e-15)
+        
+        # Second term: M_i^t for i=1,...,h_tilde
+        self.M_tilde = torch.nn.ParameterList([
+            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 1e-15)
+            for _ in range(self.h_tilde)
+        ])
+        
+        # Third term: M_0l^t for l=0,...,h
+        self.M_0l = torch.nn.ParameterList([
+            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 1e-15)
+            for _ in range(self.h)
+        ])
+        
+        # Fourth term: M_il^t for i=1,...,h_tilde, l=0,...,h
+        self.M = torch.nn.ParameterList([
+            torch.nn.ParameterList([
+                torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 1e-15)
+                for _ in range(self.h)
+            ])
+            for _ in range(self.h_tilde)
+        ])
 
 
         self.losses = torch.zeros(self.T, dtype=torch.float32, device=self.device)
@@ -116,43 +116,55 @@ class DSC(torch.nn.Module):
 
 
     def compute_control_vectorized(self, y_nat_history):
-        if len(y_nat_history) < self.m + self.m_tilde:
-            return torch.zeros(self.m_control, 1, device=self.device)
+        """
+        Compute control action based on natural output history according to the formula:
+        
+        u_t = M_0^t y_t^nat + 
+              sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} lambda_i^{1/4} [phi_i]_j M_i^t y_{t-j}^nat +
+              sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^{1/4} [phi_l]_k M_{0l}^t y_{t-k}^nat +
+              sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l lambda_i)^{1/4} [phi_l]_k [phi_i]_j M_{il}^t y_{t-j-k}^nat
+        """
+        # Need at least m + m_tilde observations for the control law
+        required_history = max(self.m, self.m_tilde)
+        if len(y_nat_history) <= required_history: return torch.zeros(self.m_control, 1, device=self.device)
 
+        # Get current natural output
         y_nat_t = y_nat_history[-1]
-        u = (self.M_tilde[0, 0] @ y_nat_t)  # Base term M^t_0 y_t^nat
-        # Second term
-        for i in range(self.h):
-            for j in range(self.m):
-                y_t_j = y_nat_history[-(j + 1)]
-                lambda_ij = self.sigma_m_tilde[i] ** 0.25
-                phi_ij = self.phi_m[j, i]
-                M_tilde_ij = self.M_tilde[i, j]
-                u += lambda_ij * phi_ij * (M_tilde_ij @ y_t_j)
-
-        # Third term
+        
+        # First term: M_0^t y_t^nat
+        u = self.M_0 @ y_nat_t
+        
+        # Second term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} lambda_i^{1/4} [phi_i]_j M_i^t y_{t-j}^nat
+        for i in range(self.h_tilde):
+            for j in range(1, self.m_tilde + 1):  # j starts from 1
+                if j < len(y_nat_history):
+                    y_t_j = y_nat_history[-j-1]  # y_{t-j}^nat
+                    lambda_i_factor = self.lambda_e[i] ** 0.25
+                    phi_i_j = self.phi_tilde[j-1, i]  # [phi_i]_j
+                    u += lambda_i_factor * phi_i_j * (self.M_tilde[i] @ y_t_j)
+        
+        # Third term: sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^{1/4} [phi_l]_k M_{0l}^t y_{t-k}^nat
         for l in range(self.h):
             for k in range(self.m):
-                y_t_k = y_nat_history[-(k + 1)]
-                sigma_l = self.sigma_m[l] ** 0.25
-                phi_lk = self.phi_m_tilde[k, l]
-                M_0l = self.M[l, k, 0, 0]  # dummy i=0,j=0 index for singleton term
-                u += sigma_l * phi_lk * (M_0l @ y_t_k)
-
-        # Fourth term
-        for i in range(self.h):
-            for j in range(self.m):
+                if k < len(y_nat_history):
+                    y_t_k = y_nat_history[-k-1]  # y_{t-k}^nat
+                    sigma_l_factor = self.sigma[l] ** 0.25
+                    phi_l_k = self.phi[k, l]  # [phi_l]_k
+                    u += sigma_l_factor * phi_l_k * (self.M_0l[l] @ y_t_k)
+        
+        # Fourth term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l lambda_i)^{1/4} [phi_l]_k [phi_i]_j M_{il}^t y_{t-j-k}^nat
+        for i in range(self.h_tilde):
+            for j in range(1, self.m_tilde + 1):  # j starts from 1
                 for l in range(self.h):
                     for k in range(self.m):
-                        if j + k + 1 >= len(y_nat_history):
-                            continue
-                        y_t_jk = y_nat_history[-(j + k + 1)]
-                        sigma_lambda = (self.sigma_m[l] * self.sigma_m_tilde[i]) ** 0.25
-                        phi_lk = self.phi_m_tilde[k, l]
-                        phi_ij = self.phi_m[j, i]
-                        M_ijkl = self.M[i, j, l, k]
-                        u += sigma_lambda * phi_lk * phi_ij * (M_ijkl @ y_t_jk)
-
+                        j_k = j + k
+                        if j_k < len(y_nat_history):
+                            y_t_jk = y_nat_history[-j_k-1]  # y_{t-j-k}^nat
+                            sigma_lambda_factor = (self.sigma[l] * self.lambda_e[i]) ** 0.25
+                            phi_l_k = self.phi[k, l]  # [phi_l]_k
+                            phi_i_j = self.phi_tilde[j-1, i]  # [phi_i]_j
+                            u += sigma_lambda_factor * phi_l_k * phi_i_j * (self.M[i][l] @ y_t_jk)
+        
         return u
 
     def run(self, initial_state=None, add_noise=False, use_control=True, num_trials=1):
@@ -197,8 +209,8 @@ class DSC(torch.nn.Module):
 
                 # STEP 1: Get observation from current state
                 y_obs = self.C @ x  # introduce the y_t as a linear projection of x
-                y_history.append(y_obs)
-                
+                y_history.append(y_obs.detach())
+                print("HERE")
 
                 # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
                 # This is the part of the observation not affected by past controls
@@ -207,15 +219,16 @@ class DSC(torch.nn.Module):
                     A_power_i = torch.matrix_power(self.A, i)
                     y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
                 
-                y_nat_history.append(y_nat_t)
+                y_nat_history.append(y_nat_t.detach())
+                #print(y_nat_t)
 
                 # STEP 3: Calculate control using LQR + learned perturbation compensation
                 if use_control:
-                    u_pert = self.compute_control_vectorized(y_nat_history)
-                    u_t =  u_pert
+                    u_pert = self.compute_control_vectorized(y_nat_history)  
+                    u_t = u_pert 
         
                 else:  u_t = torch.zeros((self.m_control, 1), device=self.device)
-            
+                u_t += -self.K @ x 
                 u_history.append(u_t)
 
 
@@ -228,7 +241,6 @@ class DSC(torch.nn.Module):
                         w_t = noise_dist.sample().view(-1, 1)
                 else: w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
-                x = x.detach()  # Detach to prevent growing the graph over time
 
                 # STEP 5: State update for next time step
                 if self.nl:
@@ -236,25 +248,26 @@ class DSC(torch.nn.Module):
                     x = self.A @ x_nl + self.B @ u_t + w_t
                 else: x = self.A @ x + self.B @ u_t + w_t
 
+                x = x.detach()  # Detach to prevent growing the graph over time
+
                 # STEP 6: Compute quadratic cost
 
                 cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
                 costs[t] = cost.detach().item()
+
+                if use_control:
+                    print("I AM OUT")
+                    optimizer.zero_grad()
+                    cost.backward()
+                    optimizer.step()
+                    scheduler.step()
            
                 max_history = max(self.m, self.m_tilde) + 2  # +2 for padding
                 if len(u_history) > max_history: u_history.pop(0)
                 if len(y_history) > max_history: y_history.pop(0)
                 if len(y_nat_history) > max_history: y_nat_history.pop(0)
-
-            if use_control:
-                
-                optimizer.zero_grad()
-                cost.backward()
-                optimizer.step()
-                scheduler.step()
-
                               
-            all_costs[trial, :] = costs
+        all_costs[trial, :] = costs
 
         # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)

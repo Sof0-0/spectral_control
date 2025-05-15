@@ -83,7 +83,7 @@ class GRC(torch.nn.Module):
             for t in range(self.T):
              
                 y_obs = self.C @ x    # Get observation
-                y_history.append(y_obs.detach())
+                y_history.append(y_obs)
                 
                 # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
                 # This is the part of the observation not affected by past controls
@@ -92,7 +92,7 @@ class GRC(torch.nn.Module):
                     A_power_i = torch.matrix_power(self.A, i)
                     y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
                 
-                y_nat_history.append(y_nat_t.detach())
+                y_nat_history.append(y_nat_t)
                 
                 # Compute control input u_t = ∑_{i=0}^h M_i^t y_nat_{t-i}
 
@@ -104,8 +104,8 @@ class GRC(torch.nn.Module):
                     # If use_control is False, use zero control for compatibility with LQG
                     u_t = torch.zeros((self.m_control, 1), device=self.device)
 
-                u_t += -self.K @ x 
-                u_history.append(u_t.detach())
+                #u_t += -self.K @ x 
+                u_history.append(u_t)
                 
                 # Generate process noise if needed
                 if add_noise:
@@ -122,7 +122,7 @@ class GRC(torch.nn.Module):
                     x = self.A @ x_nl + self.B @ u_t + w_t
                 else: x = self.A @ x + self.B @ u_t + w_t
 
-                x = x.detach()  # Detach to prevent growing the graph over time
+                #x = x.detach()  # Detach to prevent growing the graph over time
 
                 #print(u_t.shape, y_obs.shape, x.shape)
                 #print(self.Q_obs.shape, self.R.shape)
@@ -130,14 +130,24 @@ class GRC(torch.nn.Module):
                 cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
                 costs[t] = cost.detach().item()
 
-                 # Update controller matrices using gradient descent
+                # Update controller matrices using gradient descent
                 if use_control:
                     # Construct loss gradient
-                    # Use autograd for gradient computation
-                    optimizer.zero_grad()
-                    cost.backward()
-                    optimizer.step()
-                    scheduler.step()
+                    # For simplicity, we use a direct approach for gradient calculation
+                    grad_M = []
+                    for i in range(self.h+1):
+                        if i < len(y_nat_history):
+                            # dL/dM_i = 2 * R * u_t * y_nat_{t-i}^T
+                            dL_dM = 2.0 * (self.R @ u_t @ y_nat_history[-(i+1)].t())
+                            grad_M.append(dL_dM)
+                        else:
+                            grad_M.append(torch.zeros_like(self.M[i]))
+                    
+                    # Update each M_i using gradient descent
+                    for i in range(self.h+1):
+                        # Apply projection to keep controllers in constraint set K
+                        # For simplicity, we just clamp values
+                        updated_M = self.M[i] - self.lr * grad_M[i]
 
                 # Maintain fixed-length history
                 if len(u_history) > self.h + t + 1: u_history.pop(0)

@@ -83,7 +83,7 @@ class LQG(torch.nn.Module):
                 
                 # Calculate control using LQR based on estimated state
                 u_t = -self.K @ x_hat if use_control else torch.zeros((self.m_control, 1), device=self.device)
-
+                #print(u_t)
                 # Generate process noise if needed
                 if add_noise:
                     noise_dist = torch.distributions.MultivariateNormal(
