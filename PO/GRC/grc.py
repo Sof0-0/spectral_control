@@ -36,6 +36,9 @@ class GRC(torch.nn.Module):
         self.m_control = B.shape[1]  # control input dimension
         self.p = C.shape[0]  # observation dimension
         
+
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
+
         # GRC specific parameters
         self.h = h  # History length
         self.lr = 0.1  # Learning rate (eta in the algorithm)

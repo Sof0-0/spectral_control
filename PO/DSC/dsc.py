@@ -7,52 +7,84 @@ from torch.nn.functional import relu, leaky_relu
 from PO.utils import lqr, get_hankel_new
 
 class DSC(torch.nn.Module):
-    def __init__(self, A, B, C, Q, Q_obs, R, h, h_tilde, m, m_tilde,gamma, Q_noise=None, R_noise=None,  eta=0.001, T=500, name="DSC", nl=False):
+    def __init__(self, A, B, C, Q, Q_obs, R, h, h_tilde, m, m_tilde,gamma, Q_noise=None, R_noise=None,  eta=0.0001, T=100, name="DSC", nl=False):
 
         super().__init__()
         self.name = name
         self.nl = nl
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Register system matrices as buffers
-        self.register_buffer("A", torch.tensor(A, dtype=torch.float32))
-        self.register_buffer("B", torch.tensor(B, dtype=torch.float32))
-        self.register_buffer("C", torch.tensor(C, dtype=torch.float32))
-        self.register_buffer("Q", torch.tensor(Q, dtype=torch.float32))
-        self.register_buffer("Q_obs", torch.tensor(Q_obs, dtype=torch.float32))
-        self.register_buffer("R", torch.tensor(R, dtype=torch.float32))
-        self.register_buffer("K", torch.tensor(lqr(A, B, Q, R), dtype=torch.float32))
+        # Convert arrays to tensors on correct device
+        A = torch.tensor(A, dtype=torch.float32, device=self.device)
+        B = torch.tensor(B, dtype=torch.float32, device=self.device)
+        C = torch.tensor(C, dtype=torch.float32, device=self.device)
+        Q = torch.tensor(Q, dtype=torch.float32, device=self.device)
+        Q_obs = torch.tensor(Q_obs, dtype=torch.float32, device=self.device)
+        R = torch.tensor(R, dtype=torch.float32, device=self.device)
+        Q_noise = torch.tensor(Q_noise, dtype=torch.float32, device=self.device)
+        R_noise = torch.tensor(R_noise, dtype=torch.float32, device=self.device)
 
-        # Store noise parameters for compatibility with LQG
-        if Q_noise is not None: self.register_buffer("Q_noise", torch.tensor(Q_noise, dtype=torch.float32))
-        else: self.register_buffer("Q_noise", torch.eye(A.shape[0], dtype=torch.float32))
-            
-        if R_noise is not None: self.register_buffer("R_noise", torch.tensor(R_noise, dtype=torch.float32))
-        else: self.register_buffer("R_noise", torch.eye(C.shape[0], dtype=torch.float32) * 1e-1)
+        # Register system matrices as buffers
+        self.register_buffer("A", A) 
+        self.register_buffer("B", B)
+        self.register_buffer("C", C)
+        self.register_buffer("Q", Q)
+        self.register_buffer("Q_obs", Q_obs)
+        self.register_buffer("R", R)
+        self.register_buffer("Q_noise", Q_noise)
+        self.register_buffer("R_noise", R_noise)
+
+        self.d = A.shape[0]          # hidden state dimension
+        self.n = B.shape[1]  # control input dimension
+        self.p = C.shape[0]          # observation dimension
+        
         
         # Set controller parameters
+        # CHECK THESE ARE MATRICES DIMS
         self.h = h      # filter dimension parameter (h1 in the formula)
         self.h_tilde = h     # filter dimension parameter (h2 in the formula), using same value as h
         self.m = m      # number of row eigenvectors to use
         self.m_tilde = m     # number of past y_nat to consider (m1 in the formula)
        
-        self.d = A.shape[0]   # hidden state dimension
-        self.m_control = B.shape[1]  # control input dimension
-        self.p = C.shape[0]  # observation dimension
-        
-        self.eta = eta  
+     
+        self.eta = 0.9  # was 0.001
         self.gamma = gamma
-        self.T = T
 
-        #### FILTERS ######
-        # Initialize Hankel matrix and compute spectral decomposition
-        # Compute Hankel matrix for columns
-        Z_m = get_hankel_new(self.m, self.gamma)
+        #### NOISE PARAMS ####
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
+        self.sin_freq = 0.1  # Frequency of the sinusoid
+        self.sin_amplitude = 0.5  # Amplitude of the sinusoid
+        self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
+         #### NOISE PARAMS ####
+
+
+        # Initialize M matrices (controller parameters to be learned)
+        # self.M = torch.nn.ParameterList([
+        #     torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 0.02)
+        #     for _ in range(h + 1)  # M_0 to M_h
+        # ])
+        
+        #ANAND VERSION
+        self.M = torch.nn.Parameter(torch.ones(self.h_tilde+1, self.h+1, self.n, self.p, device=self.device) * 0.1)
+
+        #Initialize M_bar (additional controller parameter for DSC)
+        self.M_bar = torch.nn.Parameter(torch.ones(self.h+1, self.n, self.p, device=self.device) * 0.1)
+        
+        
+        #Set up optimizer for M matrices
+        self.optimizer = torch.optim.SGD([self.M] + [self.M_bar], lr=self.eta) # ANAND VERSION
+
+
+        ## FILTERS ######
+        #VERSION WITH ANAND
+        #Initialize Hankel matrix and compute spectral decomposition
+        #Compute Hankel matrix for columns
+        Z_m = get_hankel_new(self.m+1, self.gamma)
         eigvals_m, eigvecs_m = torch.linalg.eigh(Z_m)
         
         # Register eigenvalues and eigenvectors for columns
-        self.register_buffer("sigma", eigvals_m[-self.h:].clone().detach().to(torch.float32))  # Top-h eigenvalues
-        self.register_buffer("phi", eigvecs_m[:, -self.h:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+        self.register_buffer("sigma", eigvals_m[-(self.h+1):].clone().detach().to(torch.float32))  # Top-h eigenvalues
+        self.register_buffer("phi", eigvecs_m[:,-(self.h+1):].clone().detach().to(torch.float32))  # Corresponding eigenvectors
         
         # Compute Hankel matrix for rows
         Z_m_tilde = get_hankel_new(self.m_tilde, self.gamma)
@@ -61,18 +93,52 @@ class DSC(torch.nn.Module):
         # Register eigenvalues and eigenvectors for rows
         self.register_buffer("lambda_e", eigvals_m_tilde[-self.h_tilde:].clone().detach().to(torch.float32))  # Top-H eigenvalues
         self.register_buffer("phi_tilde", eigvecs_m_tilde[:, -self.h_tilde:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+
+
+
+    
+
+
+         # MINE
+        # Initialize M matrices (controller parameters to be learned)
+        # self.M = torch.nn.ParameterList([
+        #     torch.nn.Parameter(torch.ones(self.n, self.p, device=self.device) * 0.01)
+        #     for _ in range(h + 1)  # M_0 to M_h
+        # ])
+        
+        # # Initialize M_bar (additional controller parameter for DSC)
+        # self.M_bar = torch.nn.Parameter(torch.ones(self.n, self.p, device=self.device) * 0.01)
+
+        # #MINE
+        # Z_m = get_hankel_new(self.m, self.gamma)
+        # eigvals_m, eigvecs_m = torch.linalg.eigh(Z_m)
+        
+        # # Register eigenvalues and eigenvectors for columns
+        # self.register_buffer("sigma", eigvals_m[-self.h:].clone().detach().to(torch.float32))  # Top-h eigenvalues
+        # self.register_buffer("phi", eigvecs_m[:,-self.h:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+        
+        # # Compute Hankel matrix for rows
+        # Z_m_tilde = get_hankel_new(self.m_tilde, self.gamma)
+        # eigvals_m_tilde, eigvecs_m_tilde = torch.linalg.eigh(Z_m_tilde)
+        
+        # # Register eigenvalues and eigenvectors for rows
+        # self.register_buffer("lambda_e", eigvals_m_tilde[-self.h_tilde:].clone().detach().to(torch.float32))  # Top-H eigenvalues
+        # self.register_buffer("phi_tilde", eigvecs_m_tilde[:, -self.h_tilde:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+        
+        # self.optimizer = torch.optim.SGD(list(self.M.parameters()) + [self.M_bar], lr=self.eta)
+        # # Learning rate schedule: start low, increase, then decrease
+        def lr_lambda(epoch):
+            if epoch < 10: return 0.1  # Start with lower learning rate
+            elif epoch < 50: return 1.0  # Full learning rate for main training period
+            else: return max(0.1, 1.0 - (epoch - 50) / 100)  # Gradual decrease
+        
+        self.scheduler = lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+
         #### FILTERS ######
 
 
 
-
-        self.M_tilde = torch.nn.Parameter(torch.ones(self.h, self.m, self.m_control, self.p, device=self.device) * 0.001) 
-        self.M = torch.nn.Parameter(torch.ones(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device) * 0.001) 
-
-        # self.M_tilde = torch.nn.Parameter(torch.zeros(self.h, self.m, self.m_control, self.p, device=self.device))  # (h, m, m_c, p)
-        # self.M = torch.nn.Parameter(torch.zeros(self.h, self.m, self.h, self.m, self.m_control, self.p, device=self.device))  # (h, m, h, m, m_c, p)
-
-
+        self.T = T
         self.losses = torch.zeros(self.T, dtype=torch.float32, device=self.device)
 
 
@@ -80,6 +146,55 @@ class DSC(torch.nn.Module):
     def nonlinear_dynamics(self, x):
         """Apply nonlinear dynamics if nl flag is True"""
         return leaky_relu(x)
+
+    def compute_loss(self, y_obs, u_t):
+        """
+        Standard quadratic cost function: y^T Q_obs y + u^T R u
+        """
+        return y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
+
+    def compute_proxy_loss(self, y_nat, u_t):
+ 
+        # Proxy loss using natural observation (y^nat) instead of actual observation (y)
+        return y_nat.t() @ self.Q_obs @ y_nat + u_t.t() @ self.R @ u_t
+
+    def update_M_matrices_new(self, y_nat_history, u_history):
+        """
+        Update M matrices using gradient descent:
+        M^{t+1}_{0:h} ← Π_K [M^t_{0:h} - η∇ℓ_t(M^t_{0:h})]
+        """
+        # Zero gradients
+        self.optimizer.zero_grad()
+        
+        # Create tensor versions of y_nat_history for gradient computation
+        #y_nat_tensors = [y.clone().detach().requires_grad_(True) for y in y_nat_history]
+        
+        # Compute the control using current M matrices
+        #u_t = self.compute_control_new(y_nat_tensors)
+        y_nat_current = y_nat_history[-1].detach().clone()
+        
+        # Compute the proxy loss using natural observation (y^nat)
+        # This is the key difference from the standard LQR approach
+        proxy_loss = self.compute_rollout_loss(y_nat_current, u_history, y_nat_history)
+        
+        # Backpropagate
+        proxy_loss.backward()
+        
+        # Update parameters
+        self.optimizer.step()
+        self.scheduler.step()
+
+        # with torch.no_grad():
+        #     total_norm = torch.norm(self.M)
+        #     total_norm2 = torch.norm(self.M_bar)
+        #     max_norm = 1000.0 
+        #     if total_norm > max_norm:
+        #         self.M *= max_norm / total_norm
+        #     if total_norm2 > max_norm:
+        #         self.M_bar *= max_norm / total_norm
+        
+        # Return loss value for tracking
+        return proxy_loss.item()
 
     def compute_natural_observation(self, y_history, u_history):
         """
@@ -106,8 +221,99 @@ class DSC(torch.nn.Module):
             
         return y_nat
 
+    def compute_predicted_state(self, y_nat_current, u_history):
+        """
+        Compute predicted state by adding the effect of past controls to the natural observation
+        Similar to: final_state = y_nat[0] + jnp.tensordot(G, us, axes=([0, 2], [0, 1]))
+        """
+        # Start with current natural observation
+        predicted_state = y_nat_current.clone()
+        
+        # Construct the G matrix (similar to DRC's G)
+        # G represents the effect of past controls on the current state
+        G = []
+        A_power = torch.eye(self.d, device=self.device)
+        for i in range(min(len(u_history), self.h)):
+            G.append(self.C @ A_power @ self.B)
+            A_power = A_power @ self.A
+        
+        # Add effect of past controls
+        for i in range(min(len(u_history), self.h)):
+            if i >= len(u_history): break
+            
+            predicted_state = predicted_state + G[i] @ u_history[-(i+1)]
+        
+        return predicted_state
 
-    def compute_control_vectorized(self, y_nat_history):
+    def compute_action_from_state_new(self, state, y_nat_history):
+
+        return self.compute_control(y_nat_history)
+
+    def compute_control_mine(self, y_nat_history):
+        #Ensure we have enough history
+        if len(y_nat_history) < max(self.m, self.m_tilde) + 1:
+            # If not enough history, fall back to basic control
+            u_t = torch.zeros(self.n, 1, device=self.device)
+            if len(y_nat_history) > 0:
+                u_t = self.M_bar @ y_nat_history[-1]
+            return u_t
+            
+        # First term: M_bar y_t^nat
+        u_t = self.M_bar @ y_nat_history[-1]
+        
+        # Second term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} lambda_i^(1/4) [phi_i]_j M_i y_{t-j}^nat
+        for i in range(self.h_tilde):
+            lambda_i_pow = self.lambda_e[i] ** 0.25
+            for j in range(min(self.m_tilde, len(y_nat_history)-1)):
+                if j+1 < len(y_nat_history):
+                    phi_i_j = self.phi_tilde[j, i]
+                    u_t = u_t + lambda_i_pow * phi_i_j * (self.M[min(i+1, len(self.M)-1)] @ y_nat_history[-(j+1)])
+        
+        # Third term: sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^(1/4) [phi_l]_k M_bar y_{t-k}^nat
+        for l in range(self.h):
+            sigma_l_pow = self.sigma[l] ** 0.25
+            for k in range(min(self.m, len(y_nat_history))):
+                if k < len(y_nat_history):
+                    phi_l_k = self.phi[k, l]
+                    u_t = u_t + sigma_l_pow * phi_l_k * (self.M_bar @ y_nat_history[-(k+1)])
+        
+        # Fourth term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l * lambda_i)^(1/4) [phi_l]_k [phi_i]_j M_i y_{t-j-k}^nat
+        for i in range(self.h_tilde):
+            for j in range(min(self.m_tilde, len(y_nat_history))):
+                for l in range(self.h):
+                    for k in range(min(self.m, len(y_nat_history))):
+                        if j+k+1 < len(y_nat_history):
+                            combined_pow = (self.sigma[l] * self.lambda_e[i]) ** 0.25
+                            phi_l_k = self.phi[k, l]
+                            phi_i_j = self.phi_tilde[j, i]
+                            u_t = u_t + combined_pow * phi_l_k * phi_i_j * (self.M[min(i+1, len(self.M)-1)] @ y_nat_history[-(j+k+1)])
+            
+        return u_t
+
+    def compute_action_prediction_mine(self, state, y_nat_history):
+     
+        return self.compute_control_mine(y_nat_history)
+        
+
+
+    def compute_rollout_loss(self, y_nat, u_history, y_nat_history):
+        """
+        Compute the proxy loss for GRC matching the JAX implementation
+        """
+        # Predict the state by adding the effect of past controls
+        predicted_state = self.compute_predicted_state(y_nat, u_history)
+        
+        
+        # Compute the action for this predicted state
+        predicted_action = self.compute_action_from_state_new(predicted_state, y_nat_history)
+        # HERE 1
+        #predicted_action = self.compute_action_prediction_mine(predicted_state, y_nat_history)
+        #print(predicted_action.shape)
+        # Compute the loss using the predicted state and action
+        return predicted_state.t() @ self.Q_obs @ predicted_state + predicted_action.t() @ self.R @ predicted_action
+
+
+    def compute_control_new(self, y_nat_history):
         """
         Compute control action based on natural output history according to the formula:
         
@@ -116,49 +322,48 @@ class DSC(torch.nn.Module):
               sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^{1/4} [phi_l]_k M_{0l}^t y_{t-k}^nat +
               sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l lambda_i)^{1/4} [phi_l]_k [phi_i]_j M_{il}^t y_{t-j-k}^nat
         """
-        # Need at least m + m_tilde observations for the control law
-        required_history = max(self.m, self.m_tilde)
-        if len(y_nat_history) <= required_history: return torch.zeros(self.m_control, 1, device=self.device)
 
-        # Get current natural output
-        y_nat_t = y_nat_history[-1]
-        u = (self.M_tilde[0, 0] @ y_nat_t)  # Base term M^t_0 y_t^nat
-        # Second term
-        for i in range(self.h):
-            for j in range(self.m):
-                y_t_j = y_nat_history[-(j + 1)]
-                lambda_ij = self.sigma_m_tilde[i] ** 0.25
-                phi_ij = self.phi_m[j, i]
-                M_tilde_ij = self.M_tilde[i, j]
-                u += lambda_ij * phi_ij * (M_tilde_ij @ y_t_j)
-                #print("SECOND TERM", lambda_ij * phi_ij * (M_tilde_ij @ y_t_j))
+        # VERSION WITH ANAND
+        #print("HERE")
+        #Ensure we have enough history
+        if len(y_nat_history) < (self.m + self.m_tilde + 1):
+            # If not enough history, fall back to basic control
+            u_t = torch.zeros(self.n, 1, device=self.device)
+            if len(y_nat_history) > 0:
+                u_t = self.M_bar[0,:,:] @ y_nat_history[-1]
+            return u_t
+            
+        # First term: M_bar y_t^nat
+        u_t = self.M_bar[0,:,:] @ y_nat_history[-1]
+        #print("HERE2")
+        
+        # Second term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} lambda_i^(1/4) [phi_i]_j M_i y_{t-j}^nat
+        for i in range(self.h_tilde):
+            lambda_i_pow = self.lambda_e[i] ** 0.25
+            for j in range(self.m_tilde):
+                phi_i_j = self.phi_tilde[j, i]
+                u_t = u_t + lambda_i_pow * phi_i_j * (self.M_bar[i+1, :, :] @ y_nat_history[-(j+2)])
+        
 
-        # Third term
-        for l in range(self.h):
-            for k in range(self.m):
-                y_t_k = y_nat_history[-(k + 1)]
-                sigma_l = self.sigma_m[l] ** 0.25
-                phi_lk = self.phi_m_tilde[k, l]
-                M_0l = self.M[l, k, 0, 0]  # dummy i=0,j=0 index for singleton term
-                u += sigma_l * phi_lk * (M_0l @ y_t_k)
-                #print("THIRD TERM", sigma_l * phi_lk * (M_0l @ y_t_k))
-
-        # Fourth term
-        for i in range(self.h):
-            for j in range(self.m):
-                for l in range(self.h):
-                    for k in range(self.m):
-                        if j + k + 1 >= len(y_nat_history):
-                            continue
-                        y_t_jk = y_nat_history[-(j + k + 1)]
-                        sigma_lambda = (self.sigma_m[l] * self.sigma_m_tilde[i]) ** 0.25
-                        phi_lk = self.phi_m_tilde[k, l]
-                        phi_ij = self.phi_m[j, i]
-                        M_ijkl = self.M[i, j, l, k]
-                        u += sigma_lambda * phi_lk * phi_ij * (M_ijkl @ y_t_jk)
-                         #print("THIRD TERM", sigma_l * phi_lk * (M_0l @ y_t_k))
-
-        return u
+        # Third term: sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^(1/4) [phi_l]_k M_bar y_{t-k}^nat
+        for l in range(self.h+1):
+            sigma_l_pow = self.sigma[l] ** 0.25
+            for k in range(self.m+1):
+                phi_l_k = self.phi[k, l]
+                u_t = u_t + sigma_l_pow * phi_l_k * (self.M[0, l, :, :] @ y_nat_history[-(k+1)])
+        
+        # Fourth term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l * lambda_i)^(1/4) [phi_l]_k [phi_i]_j M_i y_{t-j-k}^nat
+        for i in range(self.h_tilde):
+            for j in range(self.m_tilde):
+                for l in range(self.h+1):
+                    for k in range(self.m+1):
+                        combined_pow = (self.sigma[l] * self.lambda_e[i]) ** 0.25
+                        phi_l_k = self.phi[k, l]
+                        phi_i_j = self.phi_tilde[j, i]
+                        u_t = u_t + combined_pow * phi_l_k * phi_i_j * (self.M[i+1, l, :, :] @ y_nat_history[-(j+k+2)])
+            
+        return u_t
+    
 
     def run(self, initial_state=None, add_noise=False, use_control=True, num_trials=1):
         """Run the controller for T time steps"""
@@ -167,18 +372,6 @@ class DSC(torch.nn.Module):
         # Store costs for multiple trials
         all_costs = torch.zeros((num_trials, self.T), dtype=torch.float32, device=self.device)
 
-        # Weight decay for stability
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.eta, weight_decay=1e-10)
-
-             # Learning rate schedule: start low, increase, then decrease
-        def lr_lambda(epoch):
-            if epoch < 10: return 0.1  # Start with lower learning rate
-            elif epoch < 50: return 1.0  # Full learning rate for main training period
-            else: return max(0.1, 1.0 - (epoch - 50) / 100)  # Gradual decrease
-
-        scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-        
-        
         
         for trial in range(num_trials):
             # Initialize state
@@ -187,87 +380,73 @@ class DSC(torch.nn.Module):
                 
 
             # Initialize histories for observations and controls
-            u_history = [torch.zeros((self.m_control, 1), device=self.device) for _ in range(self.h+1)]
-            y_history = [torch.zeros((self.p, 1), device=self.device) for _ in range(self.h+1)]
-            y_nat_history = [torch.zeros((self.p, 1), device=self.device) for _ in range(self.h+1)]
+            y_history = []
+            y_nat_history = []
+            u_history = []
 
             costs = torch.zeros(self.T, dtype=torch.float32, device=self.device)
 
+            # Initial observation
+            y_obs = self.C @ x
+            y_history.append(y_obs)
+            y_nat_history.append(y_obs)  # Initially, y_nat = y since no control has been applied
+
             for t in range(self.T):
 
-                # STEP 1: Get observation from current state
-                y_obs = self.C @ x  # introduce the y_t as a linear projection of x
-                y_history.append(y_obs.detach())
-                #print("HERE")
+                # Compute control if enabled
+                if use_control and t > 0:  # Skip first step since we need history
+                    # HERE 2
+                    u_t = self.compute_control_new(y_nat_history)
+                    #print("UT", u_t)
+                    #print(y_nat_history[-1])
+                else: u_t = torch.zeros((self.n, 1), device=self.device)
 
-                # Compute natural output y_nat_t = y_t - C ∑_{i=0}^t A^i B u_{t-i}
-                # This is the part of the observation not affected by past controls
-                y_nat_t = y_obs.clone()
-                for i in range(min(t+1, len(u_history))):
-                    A_power_i = torch.matrix_power(self.A, i)
-                    y_nat_t -= self.C @ (A_power_i @ self.B @ u_history[-(i+1)])
-                
-                y_nat_history.append(y_nat_t)
-                #print(len(y_nat_history))
+                # Add control to history
+                u_history.append(u_t.detach())
+                print(u_history)
 
-                # STEP 3: Calculate control using LQR + learned perturbation compensation
-                if use_control:
-                    u_pert = self.compute_control_vectorized(y_nat_history)
-                    u_t = u_pert
-        
-                else:  u_t = torch.zeros((self.m_control, 1), device=self.device)
-            
-                #u_t += -self.K @ x 
-                u_history.append(u_t)
-                #print(u_history)
-
-                # STEP 4: Get or compute perturbation for next state
+                # Generate process noise if needed
                 if add_noise:
-                    noise_dist = torch.distributions.MultivariateNormal(
-                        torch.zeros(self.d, device=self.device), 
-                        self.Q_noise
-                    )
-                    w_t = noise_dist.sample().view(-1, 1)
-                else: w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
-                
-                #x = x.detach()  # Detach to prevent growing the graph over time
+                    if self.noise_mode == "gaussian":
+                        noise_dist = torch.distributions.MultivariateNormal(
+                            torch.zeros(self.d, device=self.device), 
+                            self.Q_noise
+                        ) #multivariate normal (Gaussian) distribution
+                        w_t = noise_dist.sample().view(-1, 1) 
+                    elif self.noise_mode == "sinusoid":
+                        t_tensor = torch.tensor([t], dtype=torch.float32, device=self.device)  # current timestep
+                        sinusoid = self.sin_amplitude * torch.sin(2 * np.pi * self.sin_freq * t_tensor + self.sin_phase)
+                        w_t = sinusoid.view(-1, 1)
 
-                # STEP 5: State update for next time step
+                else:
+                    w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
+
+                # Update true state
                 if self.nl:
                     x_nl = self.nonlinear_dynamics(x)
                     x = self.A @ x_nl + self.B @ u_t + w_t
-                else: x = self.A @ x + self.B @ u_t + w_t
+                else:
+                    x = self.A @ x + self.B @ u_t + w_t
 
-                #x = x.detach()  # Detach to prevent growing the graph over time
+                # Get new observation
+                y_obs = self.C @ x
+                y_history.append(y_obs.detach())
+                
+                # Compute natural observation
+                y_nat = self.compute_natural_observation(y_history, u_history)
+                y_nat_history.append(y_nat.detach())
 
-                # STEP 6: Compute quadratic cost
+                # Compute actual quadratic cost for this step (for evaluation)
+                actual_cost = self.compute_loss(y_obs, u_t)
+                costs[t] = actual_cost.item()
+                
 
-                cost = y_obs.t() @ self.Q_obs @ y_obs + u_t.t() @ self.R @ u_t
-                costs[t] = cost.detach().item()
+                # Update controller parameters using proxy loss
+                if use_control and t >= 30:
+                    self.update_M_matrices_new(y_nat_history, u_history)
 
-                if use_control:
-                    print("I AM OUT")
-                    optimizer.zero_grad()
-                    cost.backward()
-                    optimizer.step()
-                    scheduler.step()
-           
-                max_history = max(self.m, self.m_tilde) + 2  # +2 for padding
-                if len(u_history) > max_history: u_history.pop(0)
-                if len(y_history) > max_history: y_history.pop(0)
-                if len(y_nat_history) > max_history: y_nat_history.pop(0)
-
-            if use_control and t >= 10:
-                #print("HERE")
-                optimizer.zero_grad()
-                cost.backward()
-                optimizer.step()
-                scheduler.step()
-
-          
             all_costs[trial, :] = costs
-
-            x = x.detach()
+           
 
         # Store average costs if multiple trials
         if num_trials > 1: self.losses = torch.mean(all_costs, dim=0)
@@ -278,3 +457,52 @@ class DSC(torch.nn.Module):
     def reset(self):
         """Reset all trajectories and losses"""
         self.losses = torch.zeros(self.T, dtype=torch.float32, device=self.device)
+
+
+
+    """
+        Compute control using the DSC formula:
+        u_t = M_bar y_t^nat + 
+              sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} lambda_i^(1/4) [phi_i]_j M_i y_{t-j}^nat +
+              sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^(1/4) [phi_l]_k M_bar y_{t-k}^nat +
+              sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l * lambda_i)^(1/4) [phi_l]_k [phi_i]_j M_i y_{t-j-k}^nat
+        """
+        # Ensure we have enough history
+        # if len(y_nat_history) < max(self.m, self.m_tilde) + 1:
+        #     # If not enough history, fall back to basic control
+        #     u_t = torch.zeros(self.n, 1, device=self.device)
+        #     if len(y_nat_history) > 0:
+        #         u_t = self.M_bar @ y_nat_history[-1]
+        #     return u_t
+            
+        # # First term: M_bar y_t^nat
+        # u_t = self.M_bar @ y_nat_history[-1]
+        
+        # # Second term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} lambda_i^(1/4) [phi_i]_j M_i y_{t-j}^nat
+        # for i in range(self.h_tilde):
+        #     lambda_i_pow = self.lambda_e[i] ** 0.25
+        #     for j in range(min(self.m_tilde, len(y_nat_history)-1)):
+        #         if j+1 < len(y_nat_history):
+        #             phi_i_j = self.phi_tilde[j, i]
+        #             u_t = u_t + lambda_i_pow * phi_i_j * (self.M[min(i+1, len(self.M)-1)] @ y_nat_history[-(j+1)])
+        
+        # # Third term: sum_{l=0}^{h} sum_{k=0}^{m} sigma_l^(1/4) [phi_l]_k M_bar y_{t-k}^nat
+        # for l in range(self.h):
+        #     sigma_l_pow = self.sigma[l] ** 0.25
+        #     for k in range(min(self.m, len(y_nat_history))):
+        #         if k < len(y_nat_history):
+        #             phi_l_k = self.phi[k, l]
+        #             u_t = u_t + sigma_l_pow * phi_l_k * (self.M_bar @ y_nat_history[-(k+1)])
+        
+        # # Fourth term: sum_{i=1}^{h_tilde} sum_{j=1}^{m_tilde} sum_{l=0}^{h} sum_{k=0}^{m} (sigma_l * lambda_i)^(1/4) [phi_l]_k [phi_i]_j M_i y_{t-j-k}^nat
+        # for i in range(self.h_tilde):
+        #     for j in range(min(self.m_tilde, len(y_nat_history))):
+        #         for l in range(self.h):
+        #             for k in range(min(self.m, len(y_nat_history))):
+        #                 if j+k+1 < len(y_nat_history):
+        #                     combined_pow = (self.sigma[l] * self.lambda_e[i]) ** 0.25
+        #                     phi_l_k = self.phi[k, l]
+        #                     phi_i_j = self.phi_tilde[j, i]
+        #                     u_t = u_t + combined_pow * phi_l_k * phi_i_j * (self.M[min(i+1, len(self.M)-1)] @ y_nat_history[-(j+k+1)])
+            
+        # return u_t

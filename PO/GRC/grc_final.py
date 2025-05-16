@@ -39,6 +39,13 @@ class GRC(torch.nn.Module):
         # GRC specific parameters
         self.h = h  # history length for the controller
         self.lr = lr  # learning rate for updating M matrices
+
+        #### NOISE PARAMS ####
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
+        self.sin_freq = 0.1  # Frequency of the sinusoid
+        self.sin_amplitude = 0.5  # Amplitude of the sinusoid
+        self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
+         #### NOISE PARAMS ####
         
         # Initialize M matrices (controller parameters to be learned)
         # M_i maps from observation y_t-i to control input u_t
@@ -174,12 +181,19 @@ class GRC(torch.nn.Module):
                 
                 # Generate process noise if needed
                 if add_noise:
-                    noise_dist = torch.distributions.MultivariateNormal(
-                        torch.zeros(self.d, device=self.device), 
-                        self.Q_noise
-                    )
-                    w_t = noise_dist.sample().view(-1, 1)
-                else: w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
+                    if self.noise_mode == "gaussian":
+                        noise_dist = torch.distributions.MultivariateNormal(
+                            torch.zeros(self.d, device=self.device), 
+                            self.Q_noise
+                        ) #multivariate normal (Gaussian) distribution
+                        w_t = noise_dist.sample().view(-1, 1) 
+                    elif self.noise_mode == "sinusoid":
+                        t_tensor = torch.tensor([t], dtype=torch.float32, device=self.device)  # current timestep
+                        sinusoid = self.sin_amplitude * torch.sin(2 * np.pi * self.sin_freq * t_tensor + self.sin_phase)
+                        w_t = sinusoid.view(-1, 1)
+
+                else:
+                    w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
                 # Update true state
                 if self.nl:

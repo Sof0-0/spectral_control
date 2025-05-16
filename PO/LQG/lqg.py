@@ -39,6 +39,13 @@ class LQG(torch.nn.Module):
         self.m_control = B.shape[1]  # control input dimension
         self.p = C.shape[0]          # observation dimension
 
+        #### NOISE PARAMS ####
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
+        self.sin_freq = 0.1  # Frequency of the sinusoid
+        self.sin_amplitude = 0.5  # Amplitude of the sinusoid
+        self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
+        #### NOISE PARAMS ####
+
         # Compute LQR gain K
         P = solve_discrete_are(np.array(A.cpu()), np.array(B.cpu()), np.array(Q.cpu()), np.array(R.cpu()))
         P = torch.tensor(P, device=self.device, dtype=torch.float32)
@@ -84,13 +91,20 @@ class LQG(torch.nn.Module):
                 # Calculate control using LQR based on estimated state
                 u_t = -self.K @ x_hat if use_control else torch.zeros((self.m_control, 1), device=self.device)
                 #print(u_t)
+                
                 # Generate process noise if needed
                 if add_noise:
-                    noise_dist = torch.distributions.MultivariateNormal(
-                        torch.zeros(self.d, device=self.device), 
-                        self.Q_noise
-                    ) #multivariate normal (Gaussian) distribution
-                    w_t = noise_dist.sample().view(-1, 1) 
+                    if self.noise_mode == "gaussian":
+                        noise_dist = torch.distributions.MultivariateNormal(
+                            torch.zeros(self.d, device=self.device), 
+                            self.Q_noise
+                        ) #multivariate normal (Gaussian) distribution
+                        w_t = noise_dist.sample().view(-1, 1) 
+                    elif self.noise_mode == "sinusoid":
+                        t_tensor = torch.tensor([t], dtype=torch.float32, device=self.device)  # current timestep
+                        sinusoid = self.sin_amplitude * torch.sin(2 * np.pi * self.sin_freq * t_tensor + self.sin_phase)
+                        w_t = sinusoid.view(-1, 1)
+
                 else:
                     w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
