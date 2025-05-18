@@ -40,7 +40,7 @@ class LQG(torch.nn.Module):
         self.p = C.shape[0]          # observation dimension
 
         #### NOISE PARAMS ####
-        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
+        self.noise_mode = "sinusoid"  # Options: "gaussian", "sinusoid"
         self.sin_freq = 0.1  # Frequency of the sinusoid
         self.sin_amplitude = 0.5  # Amplitude of the sinusoid
         self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension

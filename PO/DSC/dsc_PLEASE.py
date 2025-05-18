@@ -8,7 +8,7 @@ from scipy.linalg import solve_discrete_are
 from PO.utils import lqr, get_hankel_new
 
 class DSC(torch.nn.Module):
-    def __init__(self, A, B, C, Q, Q_obs, R, Q_noise, R_noise, h=3, m=None, T=100, lr=0.001, name="DSC", nl=False, gamma=0.1):
+    def __init__(self, A, B, C, Q, Q_obs, R, Q_noise, R_noise, h=3, m=None, T=100, lr=0.01, name="DSC", nl=False, gamma=0.1):
         super().__init__()
         self.name = name
         self.nl = nl
@@ -46,7 +46,7 @@ class DSC(torch.nn.Module):
         self.gamma = gamma  # Discount factor for Hankel matrix
 
         #### NOISE PARAMS ####
-        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
+        self.noise_mode = "sinusoid"  # Options: "gaussian", "sinusoid"
         self.sin_freq = 0.1  # Frequency of the sinusoid
         self.sin_amplitude = 0.5  # Amplitude of the sinusoid
         self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
@@ -63,14 +63,14 @@ class DSC(torch.nn.Module):
         
         # Initialize M_bar matrix (first term in formula)
         self.M_bar = torch.nn.Parameter(
-            torch.ones(self.m_control, self.p, device=self.device) * 0.09
+            torch.ones(self.m_control, self.p, device=self.device) * 0.01
         )
         
         # Initialize M matrices for the formula
         # M lives in h+1 x h x n x p where n is control dimension and p is observation dimension
         num_eigenvalues = len(self.sigma)
         self.M = torch.nn.Parameter(
-            torch.ones(self.h+1, num_eigenvalues, self.m_control, self.p, device=self.device) * 0.09
+            torch.ones(self.h+1, num_eigenvalues, self.m_control, self.p, device=self.device) * 0.01
         )
         
         # Set up optimizer for M matrices
