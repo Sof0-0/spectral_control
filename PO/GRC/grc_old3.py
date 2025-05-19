@@ -41,7 +41,7 @@ class GRC(torch.nn.Module):
         self.lr = lr  # learning rate for updating M matrices
 
         #### NOISE PARAMS ####
-        self.noise_mode = "sinusoid"  # Options: "gaussian", "sinusoid"
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
         self.sin_freq = 0.1  # Frequency of the sinusoid
         self.sin_amplitude = 0.5  # Amplitude of the sinusoid
         self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
@@ -50,19 +50,12 @@ class GRC(torch.nn.Module):
         # Initialize M matrices (controller parameters to be learned)
         # M_i maps from observation y_t-i to control input u_t
         self.M = torch.nn.ParameterList([
-            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 0.01)
+            torch.nn.Parameter(torch.ones(self.m_control, self.p, device=self.device) * 0.1)
             for _ in range(h + 1)  # M_0 to M_h
         ])
 
         # Set up optimizer for M matrices
         self.optimizer = torch.optim.SGD(self.M.parameters(), lr=self.lr)
-        # Learning rate schedule: start low, increase, then decrease
-        def lr_lambda(epoch):
-            if epoch < 10: return 0.1  # Start with lower learning rate
-            elif epoch < 50: return 1.0  # Full learning rate for main training period
-            else: return max(0.1, 1.0 - (epoch - 50) / 100)  # Gradual decrease
-        
-        self.scheduler = lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_lambda)
         
         self.T = T
         self.losses = torch.zeros(self.T, dtype=torch.float32, device=self.device)
@@ -126,89 +119,29 @@ class GRC(torch.nn.Module):
         # Proxy loss using natural observation (y^nat) instead of actual observation (y)
         return y_nat.t() @ self.Q_obs @ y_nat + u_t.t() @ self.R @ u_t
 
-
-    def compute_predicted_state(self, y_nat_current, u_history):
-        """
-        Compute predicted state by adding the effect of past controls to the natural observation
-        Similar to: final_state = y_nat[0] + jnp.tensordot(G, us, axes=([0, 2], [0, 1]))
-        """
-        # Start with current natural observation
-        predicted_state = y_nat_current.clone()
-        
-        # Construct the G matrix (similar to DRC's G)
-        # G represents the effect of past controls on the current state
-        G = []
-        A_power = torch.eye(self.d, device=self.device)
-        for i in range(min(len(u_history), self.h)):
-            G.append(self.C @ A_power @ self.B)
-            A_power = A_power @ self.A
-        
-        # Add effect of past controls
-        for i in range(min(len(u_history), self.h)):
-            if i >= len(u_history): break
-            
-            predicted_state = predicted_state + G[i] @ u_history[-(i+1)]
-        
-        return predicted_state
-
-    def compute_action_from_state(self, state, y_nat_history):
-        """
-        Compute action given a specific state and natural observation history
-        Similar to: action(obs) = -self.K @ obs + tensordot(M, y_nat)
-        """
-        # In your implementation, you don't have a separate K matrix
-        # So we'll compute the action directly from the M matrices
-        u_t = torch.zeros(self.m_control, 1, device=self.device)
-        
-        # Apply M matrices to history
-        for i in range(min(self.h + 1, len(y_nat_history))):
-            if i >= len(y_nat_history):
-                break
-            u_t = u_t + self.M[i] @ y_nat_history[-(i+1)]
-        
-        return u_t
-
-    def compute_rollout_loss(self, y_nat, u_history, y_nat_history):
-        """
-        Compute the proxy loss for GRC matching the JAX implementation
-        """
-        # Predict the state by adding the effect of past controls
-        predicted_state = self.compute_predicted_state(y_nat, u_history)
-        
-        # Compute the action for this predicted state
-        predicted_action = self.compute_action_from_state(predicted_state, y_nat_history)
-        #print(predicted_action.shape)
-        # Compute the loss using the predicted state and action
-        return predicted_state.t() @ self.Q_obs @ predicted_state + predicted_action.t() @ self.R @ predicted_action
-       
-
-    def update_M_matrices(self, y_nat_history, u_history):
+    def update_M_matrices(self, y_nat_history):
         """
         Update M matrices using gradient descent:
         M^{t+1}_{0:h} ← Π_K [M^t_{0:h} - η∇ℓ_t(M^t_{0:h})]
         """
         # Zero gradients
         self.optimizer.zero_grad()
-
-        y_nat_current = y_nat_history[-1].detach().clone()
         
         # Create tensor versions of y_nat_history for gradient computation
-        #y_nat_tensors = [y.clone().detach().requires_grad_(True) for y in y_nat_history]
+        y_nat_tensors = [y.clone().detach().requires_grad_(True) for y in y_nat_history]
         
         # Compute the control using current M matrices
-        #u_t = self.compute_control(y_nat_tensors)
+        u_t = self.compute_control(y_nat_tensors)
         
         # Compute the proxy loss using natural observation (y^nat)
         # This is the key difference from the standard LQR approach
-        #proxy_loss = self.compute_proxy_loss(y_nat_tensors[-1], u_t)
-        proxy_loss = self.compute_rollout_loss(y_nat_current, u_history, y_nat_history)
+        proxy_loss = self.compute_proxy_loss(y_nat_tensors[-1], u_t)
         
         # Backpropagate
         proxy_loss.backward()
         
         # Update parameters
         self.optimizer.step()
-        self.scheduler.step()
         
         # Return loss value for tracking
         return proxy_loss.item()
@@ -243,7 +176,7 @@ class GRC(torch.nn.Module):
                 else: u_t = torch.zeros((self.m_control, 1), device=self.device)
                 
                 # Add control to history
-                u_history.append(u_t.detach())
+                u_history.append(u_t)
                 #print(u_history)
                 
                 # Generate process noise if needed
@@ -271,19 +204,19 @@ class GRC(torch.nn.Module):
                 
                 # Get new observation
                 y_obs = self.C @ x
-                y_history.append(y_obs.detach())
+                y_history.append(y_obs)
                 
                 # Compute natural observation
                 y_nat = self.compute_natural_observation(y_history, u_history)
-                y_nat_history.append(y_nat.detach())
+                y_nat_history.append(y_nat)
                 
                 # Compute actual quadratic cost for this step (for evaluation)
                 actual_cost = self.compute_loss(y_obs, u_t)
                 costs[t] = actual_cost.item()
                 
                 # Update controller parameters using proxy loss
-                if use_control and t >= 0:
-                    self.update_M_matrices(y_nat_history, u_history)
+                if use_control:
+                    self.update_M_matrices(y_nat_history)
             
             all_costs[trial, :] = costs
             
@@ -292,6 +225,5 @@ class GRC(torch.nn.Module):
         else: self.losses = all_costs[0]
             
         return self.losses
-
 
   

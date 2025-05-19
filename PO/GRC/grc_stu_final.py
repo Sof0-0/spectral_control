@@ -5,11 +5,12 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.functional import relu, leaky_relu
 from scipy.linalg import solve_discrete_are
 
-class GRC(torch.nn.Module):
+class GRC_STU(torch.nn.Module):
     def __init__(self, A, B, C, Q, Q_obs, R, Q_noise, R_noise, h=3, T=100, lr=0.01, name="GRC", nl=False):
         super().__init__()
         self.name = name
         self.nl = nl
+        self.T = T
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Convert arrays to tensors on correct device
@@ -40,6 +41,19 @@ class GRC(torch.nn.Module):
         self.h = h  # history length for the controller
         self.lr = lr  # learning rate for updating M matrices
 
+
+        ### STU-Signal PART ###
+        # New M_stu parameter with shape (20, m_control, n)
+        self.M_stu = torch.nn.Parameter(torch.ones(20, self.m_control, self.d) * 0.005)
+
+         # STU filters:
+        Z_T = get_hankel(self.T) 
+        eigvals, eigvecs = torch.linalg.eigh(Z_T)  # Compute eigenpairs
+        self.register_buffer("sigma_stu", eigvals[-20:].clone().detach().to(torch.float32))  # Top-k eigenvalues
+        self.register_buffer("phi_stu", eigvecs[:, -20:].clone().detach().to(torch.float32))  # Corresponding eigenvectors
+        ### STU-PART ###
+
+
         #### NOISE PARAMS ####
         self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
         self.sin_freq = 0.1  # Frequency of the sinusoid
@@ -63,8 +77,6 @@ class GRC(torch.nn.Module):
             else: return max(0.1, 1.0 - (epoch - 50) / 100)  # Gradual decrease
         
         self.scheduler = lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lr_lambda)
-        
-        self.T = T
         self.losses = torch.zeros(self.T, dtype=torch.float32, device=self.device)
 
     def nonlinear_dynamics(self, x):
@@ -277,9 +289,18 @@ class GRC(torch.nn.Module):
                     w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
                 
                 # Update true state
-                if self.nl:
-                    x_nl = self.nonlinear_dynamics(x)
-                    x = self.A @ x_nl + self.B @ u_t + w_t
+                if t >= 20:
+                    ###  STU SIGNAL PART
+                    u_window = u_history[:t].view(t,-1).t()  # need to replace this line with appropriate function for lists
+
+                    for i in range(20):
+                        # Get the projection of control history onto the i-th eigenvector
+                        u_t_hist_stu = torch.matmul(u_window, self.phi_stru[:t, i:i+1])
+
+                    # Apply M_stu to transform the projection
+                    for j in range(self.d):
+                        x[j] += torch.sum(self.M_stu[i, :, j:j+1] * u_t_hist_stu)
+                    ###  STU SIGNAL PART
                 else:
                     x = self.A @ x + self.B @ u_t + w_t
                 

@@ -40,7 +40,7 @@ class LQG(torch.nn.Module):
         self.p = C.shape[0]          # observation dimension
 
         #### NOISE PARAMS ####
-        self.noise_mode = "sinusoid"  # Options: "gaussian", "sinusoid"
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid"
         self.sin_freq = 0.1  # Frequency of the sinusoid
         self.sin_amplitude = 0.5  # Amplitude of the sinusoid
         self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
@@ -80,6 +80,10 @@ class LQG(torch.nn.Module):
             # Initialize true state and estimated state
             if initial_state is not None: x = initial_state.to(self.device)
             else: x = torch.randn(self.d, 1, dtype=torch.float32, device=self.device)
+
+            # RESET previous noise for random walk
+            if self.noise_mode == "walk":
+                self.w_prev = torch.zeros((self.d, 1), device=self.device)
             
             x_hat = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
             costs = torch.zeros(self.T, dtype=torch.float32, device=self.device)
@@ -104,6 +108,14 @@ class LQG(torch.nn.Module):
                         t_tensor = torch.tensor([t], dtype=torch.float32, device=self.device)  # current timestep
                         sinusoid = self.sin_amplitude * torch.sin(2 * np.pi * self.sin_freq * t_tensor + self.sin_phase)
                         w_t = sinusoid.view(-1, 1)
+
+                    elif self.noise_mode == "walk":
+                        step_noise = torch.distributions.MultivariateNormal(
+                            torch.zeros(self.d, device=self.device), 
+                            self.Q_noise
+                        ).sample().view(-1,1) #multivariate normal (Gaussian) distribution
+                        self.w_prev = self.w_prev + step_noise
+                        w_t = self.w_prev
 
                 else:
                     w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)

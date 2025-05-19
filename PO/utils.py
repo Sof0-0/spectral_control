@@ -433,7 +433,7 @@ def run_multiple_models_with_params(controller_configs, num_runs=10, seed_base=0
     all_results = {}
     
     for name, controller_class, params in controller_configs:
-        print(f"Running {name}...")
+        #print(f"Running {name}...")
         all_losses = []
         
         for i in range(num_runs):
@@ -455,79 +455,53 @@ def run_multiple_models_with_params(controller_configs, num_runs=10, seed_base=0
     return all_results
 
 
-def plot_loss_comparison_with_ci(controllers, labels, title, window_size=10, confidence=0.95, save_path=None):
-
+def plot_loss_comparison_with_ci(results_dict, title, window_size=10, confidence=0.95, colors=None, ylim=(0, None), save_path=None):
     import matplotlib.pyplot as plt
     import numpy as np
     from scipy import stats
-    import os
-    
+
     plt.figure(figsize=(12, 7))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(controllers)))
-    smoothed_list = []
-    means = []
-    lowers = []
-    uppers = []
-    
-    for i, (controller, label) in enumerate(zip(controllers, labels)):
-        # Convert losses to numpy if they're not already
-        if hasattr(controller.losses, 'cpu'):
-            losses_np = controller.losses.cpu().numpy()
-        else:
-            losses_np = np.array(controller.losses)
-        
-        # Ensure losses are in 2D format [num_trials, time_steps]
-        if len(losses_np.shape) == 1:
-            losses_np = losses_np.reshape(1, -1)
-        
-        num_trials, T = losses_np.shape
-        
-        if T < window_size:
-            raise ValueError("Window size must be smaller than the length of the loss sequence.")
-        
-        # Compute moving average for each trial
+
+    for i, (label, data) in enumerate(results_dict.items()):
+        data = np.array(data)  # Shape: [num_runs, T]
+
+        if len(data.shape) != 2:
+            raise ValueError(f"Loss data for '{label}' must be 2D [num_trials, time]")
+
+        # Apply moving average
         smoothed = np.array([
             np.convolve(run, np.ones(window_size)/window_size, mode='valid')
-            for run in losses_np
+            for run in data
         ])
-        
-        smoothed_list.append(smoothed)
         mean = smoothed.mean(axis=0)
-        means.append(mean)
-        
-        # Calculate confidence interval (if multiple trials)
-        if num_trials > 1:
+
+        # Confidence Interval
+        if smoothed.shape[0] > 1:
             stderr = stats.sem(smoothed, axis=0)
-            t_val = stats.t.ppf((1 + confidence) / 2, df=num_trials - 1)
+            t_val = stats.t.ppf((1 + confidence) / 2, df=smoothed.shape[0] - 1)
             ci = t_val * stderr
         else:
-            # For single trial, we can't compute a confidence interval
-            # Could use moving standard deviation instead if desired
             ci = np.zeros_like(mean)
-        
+
         lower = mean - ci
         upper = mean + ci
-        lowers.append(lower)
-        uppers.append(upper)
-        
-        x = np.arange(window_size - 1, T)
-        plt.plot(x, mean, color=colors[i], label=label, linewidth=2)
-        plt.fill_between(x, lower, upper, color=colors[i], alpha=0.2)
-    
-    plt.xlabel('Time Step')
-    plt.ylabel(f'{window_size}-Step Average Loss')
-    plt.title(f"{title}\n({int(confidence * 100)}% Confidence Interval)")
+
+        color = colors[label] if colors and label in colors else f"C{i}"
+        plt.plot(mean, label=label, color=color)
+        plt.fill_between(np.arange(len(mean)), lower, upper, color=color, alpha=0.3)
+
+    plt.title(title)
+    plt.xlabel("Time Step")
+    plt.ylabel("Cost")
     plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
+    if ylim is not None:
+        plt.ylim(ylim)
     if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    
+        plt.savefig(save_path, bbox_inches='tight')
+    plt.grid(True)
     plt.show()
+
     
-    return means, lowers, uppers
 
 
 
