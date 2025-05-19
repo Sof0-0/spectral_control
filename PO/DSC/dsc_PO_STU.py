@@ -11,7 +11,6 @@ from PO.utils import lqr, get_hankel_new, get_hankel
 
 #### TODO: implement the STU signal
 
-
 class DSC_PO_STU(torch.nn.Module):
     def __init__(self, A, B, C, Q, R, h, H, gamma, eta=0.001, T=100, name="DSC", nl=False):
 

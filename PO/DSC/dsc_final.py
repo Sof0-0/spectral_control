@@ -5,7 +5,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.nn.functional import relu, leaky_relu
 from scipy.linalg import solve_discrete_are
 
-from PO.utils import lqr, get_hankel_new
+from PO.utils import lqr, get_hankel_new, get_hankel
 
 class DSC(torch.nn.Module):
     def __init__(self, A, B, C, Q, Q_obs, R, Q_noise, R_noise, h=3, m=None, T=100, lr=0.01, name="DSC", nl=False, gamma=0.1):
@@ -46,7 +46,7 @@ class DSC(torch.nn.Module):
         self.gamma = gamma  # Discount factor for Hankel matrix
 
         #### NOISE PARAMS ####
-        self.noise_mode = "sinusoid"  # Options: "gaussian", "sinusoid"
+        self.noise_mode = "gaussian"  # Options: "gaussian", "sinusoid", "walk"
         self.sin_freq = 0.1  # Frequency of the sinusoid
         self.sin_amplitude = 0.5  # Amplitude of the sinusoid
         self.sin_phase = torch.rand(self.d, device=self.device) * 2 * np.pi  # Random phase per dimension
@@ -63,14 +63,14 @@ class DSC(torch.nn.Module):
         
         # Initialize M_bar matrix (first term in formula)
         self.M_bar = torch.nn.Parameter(
-            torch.ones(self.m_control, self.p, device=self.device) * 0.01
+            torch.ones(self.m_control, self.p, device=self.device) * 0.006
         )
         
         # Initialize M matrices for the formula
         # M lives in h+1 x h x n x p where n is control dimension and p is observation dimension
         num_eigenvalues = len(self.sigma)
         self.M = torch.nn.Parameter(
-            torch.ones(self.h+1, num_eigenvalues, self.m_control, self.p, device=self.device) * 0.01
+            torch.ones(self.h+1, num_eigenvalues, self.m_control, self.p, device=self.device) * 0.006 # 0.045 for linear
         )
         
         # Set up optimizer for M matrices
@@ -174,20 +174,17 @@ class DSC(torch.nn.Module):
             for j in range(1, min(m_actual+1, available_history)):
                 for l in range(min(h_actual+1, self.M.shape[1])):
                     for k in range(min(m_actual+1, available_history - j)):
-                        # Check indices are in bounds
                         if i-1 < len(self.sigma) and l < len(self.sigma):
                             if j-1 < self.phi.shape[0] and k < self.phi.shape[0]:
-                                # Get eigenvalues and eigenvectors with bounds checking
                                 lambda_i = self.sigma[i-1]
                                 sigma_l = self.sigma[l]
                                 
                                 phi_i_j = self.phi[j-1, i-1] if i-1 < self.phi.shape[1] else 0.0
                                 phi_l_k = self.phi[k, l] if l < self.phi.shape[1] else 0.0
                                 
-                                # Compute the combined factor
+                               
                                 combined_factor = (sigma_l * lambda_i).pow(0.25) * phi_l_k * phi_i_j
-                                
-                                # Add the contribution with bounds checking for history
+                            
                                 combined_idx = j + k
                                 if combined_idx < available_history:
                                     u_t = u_t + combined_factor * (self.M[i, l] @ y_nat_history[-combined_idx])
@@ -285,6 +282,10 @@ class DSC(torch.nn.Module):
                 x = initial_state.to(self.device)
             else: x = torch.randn(self.d, 1, dtype=torch.float32, device=self.device)
             
+            # RESET previous noise for random walk
+            if self.noise_mode == "walk":
+                self.w_prev = torch.zeros((self.d, 1), device=self.device)
+
             # Track observation and control history
             y_history = []
             y_nat_history = []
@@ -304,8 +305,8 @@ class DSC(torch.nn.Module):
                 
                 # Add control to history
                 u_history.append(u_t.detach())
-                #print(u_history)
-                #print(len(y_nat_history))
+                # print(u_history)
+                # print(len(y_nat_history))
                 
                 # Generate process noise if needed
                 if add_noise:
@@ -314,11 +315,20 @@ class DSC(torch.nn.Module):
                             torch.zeros(self.d, device=self.device), 
                             self.Q_noise
                         ) #multivariate normal (Gaussian) distribution
-                        w_t = noise_dist.sample().view(-1, 1) 
+                        w_t = noise_dist.sample().view(-1, 1)
+
                     elif self.noise_mode == "sinusoid":
                         t_tensor = torch.tensor([t], dtype=torch.float32, device=self.device)  # current timestep
                         sinusoid = self.sin_amplitude * torch.sin(2 * np.pi * self.sin_freq * t_tensor + self.sin_phase)
                         w_t = sinusoid.view(-1, 1)
+
+                    elif self.noise_mode == "walk":
+                        step_noise = torch.distributions.MultivariateNormal(
+                            torch.zeros(self.d, device=self.device), 
+                            self.Q_noise
+                        ).sample().view(-1,1) #multivariate normal (Gaussian) distribution
+                        self.w_prev = self.w_prev + step_noise
+                        w_t = self.w_prev
 
                 else:
                     w_t = torch.zeros(self.d, 1, dtype=torch.float32, device=self.device)
@@ -353,3 +363,22 @@ class DSC(torch.nn.Module):
         else: self.losses = all_costs[0]
             
         return self.losses
+
+
+
+# elif self.noise_mode == "random_walk":
+#     if not hasattr(self, 'w_prev'):
+#         # Initialize previous noise to zeros on the first step
+#         self.w_prev = torch.zeros((self.d, 1), device=self.device)
+    
+#     # Sample Gaussian noise for the random walk step
+#     step_noise = torch.distributions.MultivariateNormal(
+#         torch.zeros(self.d, device=self.device), 
+#         self.Q_noise
+#     ).sample().view(-1, 1)
+
+#     # Add step to previous state
+#     w_t = self.w_prev + step_noise
+
+#     # Save current noise for next timestep
+#     self.w_prev = w_t
